@@ -37,30 +37,13 @@ def stroke_intersects_polygon(stroke, polygon):
     """Select on any visible contact, including crossings between sampled points."""
     if len(polygon) < 3:
         return False
-    points = smooth_points(stroke['points'])
+    points = stroke['points']
     if any(inside(p, polygon) for p in points):
         return True
     edges = list(zip(polygon, polygon[1:] + polygon[:1]))
     return any(segments_distance(a, b, c, d) <= stroke['width']/2
                for a, b in zip(points, points[1:] + points[-1:])
                for c, d in edges)
-
-
-def smooth_points(points):
-    if len(points) < 3:
-        return points
-    result = [list(points[0])]
-    start = points[0]
-    for i in range(1,len(points)-1):
-        control = points[i]
-        end = [(control[j]+points[i+1][j])/2 for j in (0,1)]
-        steps = max(2, min(32, int(math.dist(start,control)+math.dist(control,end))))
-        for k in range(1,steps+1):
-            t = k/steps
-            result.append([(1-t)**2*start[j]+2*(1-t)*t*control[j]+t*t*end[j] for j in (0,1)])
-        start = end
-    result.append(list(points[-1]))
-    return result
 
 
 def selection_bounds(strokes, selection):
@@ -84,64 +67,45 @@ def resize_strokes(originals, anchor, start, end):
 
 
 class PageRenderer:
-    """Vector coordinates remain the source; rasterize visible strokes at 2x AA."""
-    def __init__(self, canvas, photo_factory=None):
+    """Draw raw vector paths in Tk; no image allocation, smoothing or resampling."""
+    def __init__(self, canvas):
         self.canvas = canvas
-        self.items, self.snapshot, self.images = [], [], []
+        self.items, self.snapshot = [], []
         self.zoom = 1.
-        self.camera = None
-        self.photo_factory = photo_factory
+        self.last_zoom = None
         self.lines = [canvas.create_line(0,y,1000,y,fill='#ecece7') for y in range(40,1400,32)]
 
     def render(self, strokes, selection):
-        from PIL import Image, ImageDraw, ImageTk
-        canvas = self.canvas
-        zoom = self.zoom
-        viewport = (canvas.canvasx(0),canvas.canvasy(0),canvas.winfo_width(),canvas.winfo_height(),zoom)
-        camera_changed = self.camera != viewport
-        self.camera = viewport
-        vx,vy,vw,vh,_ = viewport
-        for line,y in zip(self.lines,range(40,1400,32)):
-            canvas.coords(line,0,y*zoom,1000*zoom,y*zoom)
-        while len(self.items) > len(strokes):
+        canvas, zoom = self.canvas, self.zoom
+        if self.last_zoom != zoom:
+            for line,y in zip(self.lines,range(40,1400,32)):
+                canvas.coords(line,0,y*zoom,1000*zoom,y*zoom)
+            self.last_zoom = zoom
+        while len(self.items)>len(strokes):
             canvas.delete(self.items.pop())
-            self.snapshot.pop(); self.images.pop()
+            self.snapshot.pop()
         for i,stroke in enumerate(strokes):
-            if not camera_changed and i<len(self.snapshot) and self.snapshot[i]==stroke:
+            points = stroke['points']
+            # Editing replaces the point list; drawing appends to it. No full-page copy.
+            key = (id(stroke),id(points),len(points),stroke['width'],stroke['color'],stroke['tool'],zoom)
+            if i<len(self.snapshot) and self.snapshot[i]==key:
                 continue
-            points = smooth_points(stroke['points'])
-            pad = stroke['width']*zoom/2+3
-            x0 = max(math.floor(min(p[0] for p in points)*zoom-pad),math.floor(vx)-2)
-            y0 = max(math.floor(min(p[1] for p in points)*zoom-pad),math.floor(vy)-2)
-            x1 = min(math.ceil(max(p[0] for p in points)*zoom+pad),math.ceil(vx+vw)+2)
-            y1 = min(math.ceil(max(p[1] for p in points)*zoom+pad),math.ceil(vy+vh)+2)
-            visible = x1>x0 and y1>y0
-            image = Image.new('RGBA',(max(1,x1-x0)*2 if visible else 2,max(1,y1-y0)*2 if visible else 2))
-            if visible:
-                draw = ImageDraw.Draw(image)
-                from PIL.ImageColor import getrgb
-                ink = getrgb(stroke['color']) + (90 if stroke['tool']=='형광펜' else 255,)
-                coords = [((x*zoom-x0)*2,(y*zoom-y0)*2) for x,y in points]
-                thickness = max(1,round(stroke['width']*zoom*2))
-                if len(coords)>1:
-                    draw.line(coords,fill=ink,width=thickness,joint='curve')
-                radius = thickness/2
-                for x,y in (coords[0],coords[-1]):
-                    draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill=ink)
-            image = image.resize((max(1,image.width//2),max(1,image.height//2)),Image.Resampling.LANCZOS)
-            photo = (self.photo_factory or ImageTk.PhotoImage)(image)
+            coords = [value*zoom for point in points for value in point]
+            if len(coords)==2:
+                coords += [coords[0]+.01,coords[1]]
+            options = dict(fill=stroke['color'],width=stroke['width']*zoom,
+                           capstyle='round',joinstyle='round',smooth=False,
+                           stipple='gray50' if stroke['tool']=='형광펜' else '')
             if i<len(self.items):
-                canvas.coords(self.items[i],x0,y0)
-                canvas.itemconfigure(self.items[i],image=photo)
-                self.snapshot[i] = copy.deepcopy(stroke)
-                self.images[i] = photo
+                canvas.coords(self.items[i],*coords)
+                canvas.itemconfigure(self.items[i],**options)
+                self.snapshot[i]=key
             else:
-                self.items.append(canvas.create_image(x0,y0,image=photo,anchor='nw'))
-                self.snapshot.append(copy.deepcopy(stroke)); self.images.append(photo)
+                self.items.append(canvas.create_line(*coords,**options))
+                self.snapshot.append(key)
         canvas.delete('selection')
         if selection:
-            bounds = selection_bounds(strokes,selection)
-            x0,y0,x1,y1 = [v*zoom for v in bounds]
+            x0,y0,x1,y1 = [v*zoom for v in selection_bounds(strokes,selection)]
             canvas.create_rectangle(x0,y0,x1,y1,outline='#4263eb',dash=(5,3),tags='selection')
             for x,y in ((x0,y0),(x1,y0),(x0,y1),(x1,y1)):
                 canvas.create_rectangle(x-5,y-5,x+5,y+5,fill='white',outline='#4263eb',tags='selection')
@@ -227,7 +191,7 @@ def main():
     from .core import Tracker, Friction
 
     root = tk.Tk()
-    root.title('종이 · 필기 노트 — Ink · 벡터')
+    root.title('종이 · 필기 노트 — Ink · 경량 벡터')
     root.geometry('1280x900')
     from .windows_input import TouchFilter
     try:
