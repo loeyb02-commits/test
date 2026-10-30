@@ -33,6 +33,58 @@ def inside(p, polygon):
     return hit
 
 
+def stroke_intersects_polygon(stroke, polygon):
+    """Select on any visible contact, including crossings between sampled points."""
+    if len(polygon) < 3:
+        return False
+    points = stroke['points']
+    if any(inside(p, polygon) for p in points):
+        return True
+    edges = list(zip(polygon, polygon[1:] + polygon[:1]))
+    return any(segments_distance(a, b, c, d) <= stroke['width']/2
+               for a, b in zip(points, points[1:] + points[-1:])
+               for c, d in edges)
+
+
+class PageRenderer:
+    """Keep canvas objects alive while writing; never clear the whole page."""
+    def __init__(self, canvas):
+        self.canvas = canvas
+        self.items = []
+        self.snapshot = []
+        for y in range(40, 1400, 32):
+            canvas.create_line(0, y, 1000, y, fill='#ecece7')
+
+    def render(self, strokes, selection):
+        canvas = self.canvas
+        while len(self.items) > len(strokes):
+            canvas.delete(self.items.pop())
+            self.snapshot.pop()
+        for i, stroke in enumerate(strokes):
+            if i < len(self.snapshot) and self.snapshot[i] == stroke:
+                continue
+            coords = [v for p in stroke['points'] for v in p]
+            if len(coords) == 2:
+                coords += [coords[0], coords[1] + .01]
+            options = dict(fill=stroke['color'], width=stroke['width'],
+                           capstyle='round', joinstyle='round',
+                           stipple='gray50' if stroke['tool'] == '형광펜' else '')
+            if i < len(self.items):
+                canvas.coords(self.items[i], *coords)
+                canvas.itemconfigure(self.items[i], **options)
+                self.snapshot[i] = copy.deepcopy(stroke)
+            else:
+                self.items.append(canvas.create_line(*coords, **options))
+                self.snapshot.append(copy.deepcopy(stroke))
+        canvas.delete('selection')
+        if selection:
+            pts = [p for i in selection for p in strokes[i]['points']]
+            x0, y0 = min(p[0] for p in pts), min(p[1] for p in pts)
+            x1, y1 = max(p[0] for p in pts), max(p[1] for p in pts)
+            canvas.create_rectangle(x0-8, y0-8, x1+8, y1+8,
+                                    outline='#4263eb', dash=(5,3), tags='selection')
+
+
 class Library:
     def __init__(self, path):
         self.path = Path(path)
@@ -99,7 +151,8 @@ def main():
     gesture = None
     tool = tk.StringVar(value='펜')
     color = tk.StringVar(value='#202124')
-    width = tk.DoubleVar(value=3)
+    widths = {name: tk.DoubleVar(value=value) for name, value in
+              [('펜', 3), ('형광펜', 16), ('획 지우개', 12)]}
     sound = tk.BooleanVar(value=False)
     volume = tk.DoubleVar(value=.3)
     status = tk.StringVar()
@@ -119,7 +172,7 @@ def main():
         save_job = None
         try:
             library.save()
-            status.set(f'자동 저장됨 · {path}')
+            status.set('자동 저장됨')
         except OSError as exc:
             status.set(f'저장 실패: {exc}')
             return False
@@ -132,6 +185,8 @@ def main():
         status.set('저장 중…')
         save_job = root.after(400, save)
 
+    # Reserve a fixed-height status row before packing the expanding content.
+    ttk.Label(root, textvariable=status, anchor='w', width=1).pack(side='bottom', fill='x')
     side = ttk.Frame(root, padding=10)
     side.pack(side='left', fill='y')
     ttk.Label(side, text='나의 노트', font=('', 17, 'bold')).pack(anchor='w', pady=8)
@@ -154,7 +209,7 @@ def main():
     canvas.pack(fill='both', expand=True)
     footer = ttk.Frame(main_frame, padding=8)
     footer.pack(fill='x')
-    ttk.Label(root, textvariable=status, anchor='w').pack(side='bottom', fill='x')
+    renderer = PageRenderer(canvas)
 
     def rebuild():
         tree.delete(*tree.get_children())
@@ -171,25 +226,10 @@ def main():
         tree.selection_set(note['id'])
 
     def redraw():
-        canvas.delete('all')
-        for y in range(40, 1400, 32):
-            canvas.create_line(0, y, 1000, y, fill='#ecece7')
-        for i, s in enumerate(strokes()):
-            points = s['points']
-            coords = [v for p in points for v in p]
-            if len(points) == 1:
-                coords += coords
-                coords[-1] += .01
-            options = dict(fill=s['color'], width=s['width'], capstyle='round', joinstyle='round')
-            if s['tool'] == '형광펜':
-                options['stipple'] = 'gray50'
-            canvas.create_line(*coords, **options)
-        if selection:
-            pts = [p for i in selection for p in strokes()[i]['points']]
-            x0, y0 = min(p[0] for p in pts), min(p[1] for p in pts)
-            x1, y1 = max(p[0] for p in pts), max(p[1] for p in pts)
-            canvas.create_rectangle(x0-8,y0-8,x1+8,y1+8,outline='#4263eb',dash=(5,3))
-        page_label.set(f'{note["title"]} · {page+1} / {len(note["pages"])} 페이지')
+        renderer.render(strokes(), selection)
+        label = f'{note["title"]} · {page+1} / {len(note["pages"])} 페이지'
+        if page_label.get() != label:
+            page_label.set(label)
 
     def choose(event=None):
         nonlocal note, page, gesture
@@ -278,9 +318,14 @@ def main():
 
     for label in ('펜','형광펜','획 지우개','올가미'):
         ttk.Radiobutton(toolbar,text=label,value=label,variable=tool,command=palette).pack(side='left',padx=3)
-    ttk.Label(toolbar,text='두께').pack(side='left',padx=8)
-    ttk.Scale(toolbar,from_=1,to=30,variable=width,length=100).pack(side='left')
-    ttk.Label(toolbar,textvariable=width,width=5).pack(side='left')
+    thickness = ttk.Frame(main_frame, padding=(8, 4))
+    thickness.pack(before=colors_frame, fill='x')
+    for name in ('펜', '형광펜', '획 지우개'):
+        ttk.Label(thickness, text=name+' 두께').pack(side='left', padx=(8, 2))
+        tk.Scale(thickness, from_=1, to=40 if name=='형광펜' else 30,
+                 resolution=.5, digits=3, orient='horizontal', length=150,
+                 variable=widths[name], showvalue=True, sliderlength=24,
+                 highlightthickness=0).pack(side='left')
 
     def undo(reverse=False):
         if gesture: return
@@ -355,13 +400,13 @@ def main():
         if mode!='올가미': history().record(strokes())
         gesture=dict(mode=mode,points=[p],last=p)
         if mode in ('펜','형광펜'):
-            strokes().append(dict(tool=mode,color=color.get(),width=width.get(),points=[p]))
+            strokes().append(dict(tool=mode,color=color.get(),width=widths[mode].get(),points=[p]))
             tracker.update(p[0]/1000,p[1]/1000,.6,True)
         elif mode=='획 지우개': erase(p,p)
         redraw()
 
     def erase(a,b):
-        strokes()[:]=[s for s in strokes() if not any(segments_distance(a,b,p,q)<=width.get()/2+s['width']/2 for p,q in zip(s['points'],s['points'][1:]+s['points'][-1:]))]
+        strokes()[:]=[s for s in strokes() if not any(segments_distance(a,b,p,q)<=widths['획 지우개'].get()/2+s['width']/2 for p,q in zip(s['points'],s['points'][1:]+s['points'][-1:]))]
 
     def drag(e):
         if not gesture: return
@@ -378,8 +423,9 @@ def main():
         else: gesture['points'].append(p)
         gesture['last']=p
         redraw()
+        canvas.delete('lasso')
         if mode=='올가미' and len(gesture['points'])>1:
-            canvas.create_line(*[v for p in gesture['points'] for v in p],fill='#4263eb',dash=(4,3))
+            canvas.create_line(*[v for p in gesture['points'] for v in p],fill='#4263eb',dash=(4,3),tags='lasso')
 
     def release(e):
         nonlocal gesture
@@ -388,9 +434,10 @@ def main():
         if gesture['mode']=='올가미':
             polygon=gesture['points']
             if len(polygon)>2:
-                selection[:]=[i for i,s in enumerate(strokes()) if all(inside(p,polygon) for p in s['points'])]
+                selection[:]=[i for i,s in enumerate(strokes()) if stroke_intersects_polygon(s,polygon)]
         else: changed()
         gesture=None
+        canvas.delete('lasso')
         redraw()
     canvas.bind('<ButtonPress-1>',press)
     canvas.bind('<B1-Motion>',drag)
