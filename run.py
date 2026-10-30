@@ -1,3 +1,4 @@
-from penasmr.__main__ import main
+from penasmr.notebook import main
+
 if __name__ == '__main__':
     main()
