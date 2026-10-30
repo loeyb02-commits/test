@@ -37,7 +37,7 @@ def stroke_intersects_polygon(stroke, polygon):
     """Select on any visible contact, including crossings between sampled points."""
     if len(polygon) < 3:
         return False
-    points = stroke['points']
+    points = smooth_points(stroke['points'])
     if any(inside(p, polygon) for p in points):
         return True
     edges = list(zip(polygon, polygon[1:] + polygon[:1]))
@@ -46,43 +46,105 @@ def stroke_intersects_polygon(stroke, polygon):
                for c, d in edges)
 
 
+def smooth_points(points):
+    if len(points) < 3:
+        return points
+    result = [list(points[0])]
+    start = points[0]
+    for i in range(1,len(points)-1):
+        control = points[i]
+        end = [(control[j]+points[i+1][j])/2 for j in (0,1)]
+        steps = max(2, min(32, int(math.dist(start,control)+math.dist(control,end))))
+        for k in range(1,steps+1):
+            t = k/steps
+            result.append([(1-t)**2*start[j]+2*(1-t)*t*control[j]+t*t*end[j] for j in (0,1)])
+        start = end
+    result.append(list(points[-1]))
+    return result
+
+
+def selection_bounds(strokes, selection):
+    selected = [strokes[i] for i in selection]
+    return (min(p[0]-s['width']/2 for s in selected for p in s['points'])-8,
+            min(p[1]-s['width']/2 for s in selected for p in s['points'])-8,
+            max(p[0]+s['width']/2 for s in selected for p in s['points'])+8,
+            max(p[1]+s['width']/2 for s in selected for p in s['points'])+8)
+
+
+def resize_strokes(originals, anchor, start, end):
+    dx,dy = start[0]-anchor[0],start[1]-anchor[1]
+    # Uniform scaling keeps handwriting proportions and line widths intact.
+    denominator = dx*dx+dy*dy
+    factor = max(.05,min(20,((end[0]-anchor[0])*dx+(end[1]-anchor[1])*dy)/denominator)) if denominator else 1
+    result = copy.deepcopy(originals)
+    for stroke in result:
+        stroke['points'] = [[anchor[0]+(x-anchor[0])*factor,anchor[1]+(y-anchor[1])*factor] for x,y in stroke['points']]
+        stroke['width'] *= factor
+    return result
+
+
 class PageRenderer:
-    """Keep canvas objects alive while writing; never clear the whole page."""
-    def __init__(self, canvas):
+    """Vector coordinates remain the source; rasterize visible strokes at 2x AA."""
+    def __init__(self, canvas, photo_factory=None):
         self.canvas = canvas
-        self.items = []
-        self.snapshot = []
-        for y in range(40, 1400, 32):
-            canvas.create_line(0, y, 1000, y, fill='#ecece7')
+        self.items, self.snapshot, self.images = [], [], []
+        self.zoom = 1.
+        self.camera = None
+        self.photo_factory = photo_factory
+        self.lines = [canvas.create_line(0,y,1000,y,fill='#ecece7') for y in range(40,1400,32)]
 
     def render(self, strokes, selection):
+        from PIL import Image, ImageDraw, ImageTk
         canvas = self.canvas
+        zoom = self.zoom
+        viewport = (canvas.canvasx(0),canvas.canvasy(0),canvas.winfo_width(),canvas.winfo_height(),zoom)
+        camera_changed = self.camera != viewport
+        self.camera = viewport
+        vx,vy,vw,vh,_ = viewport
+        for line,y in zip(self.lines,range(40,1400,32)):
+            canvas.coords(line,0,y*zoom,1000*zoom,y*zoom)
         while len(self.items) > len(strokes):
             canvas.delete(self.items.pop())
-            self.snapshot.pop()
-        for i, stroke in enumerate(strokes):
-            if i < len(self.snapshot) and self.snapshot[i] == stroke:
+            self.snapshot.pop(); self.images.pop()
+        for i,stroke in enumerate(strokes):
+            if not camera_changed and i<len(self.snapshot) and self.snapshot[i]==stroke:
                 continue
-            coords = [v for p in stroke['points'] for v in p]
-            if len(coords) == 2:
-                coords += [coords[0], coords[1] + .01]
-            options = dict(fill=stroke['color'], width=stroke['width'],
-                           capstyle='round', joinstyle='round',
-                           stipple='gray50' if stroke['tool'] == '형광펜' else '')
-            if i < len(self.items):
-                canvas.coords(self.items[i], *coords)
-                canvas.itemconfigure(self.items[i], **options)
+            points = smooth_points(stroke['points'])
+            pad = stroke['width']*zoom/2+3
+            x0 = max(math.floor(min(p[0] for p in points)*zoom-pad),math.floor(vx)-2)
+            y0 = max(math.floor(min(p[1] for p in points)*zoom-pad),math.floor(vy)-2)
+            x1 = min(math.ceil(max(p[0] for p in points)*zoom+pad),math.ceil(vx+vw)+2)
+            y1 = min(math.ceil(max(p[1] for p in points)*zoom+pad),math.ceil(vy+vh)+2)
+            visible = x1>x0 and y1>y0
+            image = Image.new('RGBA',(max(1,x1-x0)*2 if visible else 2,max(1,y1-y0)*2 if visible else 2))
+            if visible:
+                draw = ImageDraw.Draw(image)
+                from PIL.ImageColor import getrgb
+                ink = getrgb(stroke['color']) + (90 if stroke['tool']=='형광펜' else 255,)
+                coords = [((x*zoom-x0)*2,(y*zoom-y0)*2) for x,y in points]
+                thickness = max(1,round(stroke['width']*zoom*2))
+                if len(coords)>1:
+                    draw.line(coords,fill=ink,width=thickness,joint='curve')
+                radius = thickness/2
+                for x,y in (coords[0],coords[-1]):
+                    draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill=ink)
+            image = image.resize((max(1,image.width//2),max(1,image.height//2)),Image.Resampling.LANCZOS)
+            photo = (self.photo_factory or ImageTk.PhotoImage)(image)
+            if i<len(self.items):
+                canvas.coords(self.items[i],x0,y0)
+                canvas.itemconfigure(self.items[i],image=photo)
                 self.snapshot[i] = copy.deepcopy(stroke)
+                self.images[i] = photo
             else:
-                self.items.append(canvas.create_line(*coords, **options))
-                self.snapshot.append(copy.deepcopy(stroke))
+                self.items.append(canvas.create_image(x0,y0,image=photo,anchor='nw'))
+                self.snapshot.append(copy.deepcopy(stroke)); self.images.append(photo)
         canvas.delete('selection')
         if selection:
-            pts = [p for i in selection for p in strokes[i]['points']]
-            x0, y0 = min(p[0] for p in pts), min(p[1] for p in pts)
-            x1, y1 = max(p[0] for p in pts), max(p[1] for p in pts)
-            canvas.create_rectangle(x0-8, y0-8, x1+8, y1+8,
-                                    outline='#4263eb', dash=(5,3), tags='selection')
+            bounds = selection_bounds(strokes,selection)
+            x0,y0,x1,y1 = [v*zoom for v in bounds]
+            canvas.create_rectangle(x0,y0,x1,y1,outline='#4263eb',dash=(5,3),tags='selection')
+            for x,y in ((x0,y0),(x1,y0),(x0,y1),(x1,y1)):
+                canvas.create_rectangle(x-5,y-5,x+5,y+5,fill='white',outline='#4263eb',tags='selection')
 
 
 class Library:
@@ -165,7 +227,7 @@ def main():
     from .core import Tracker, Friction
 
     root = tk.Tk()
-    root.title('종이 · 필기 노트')
+    root.title('종이 · 필기 노트 — Ink · 벡터')
     root.geometry('1280x900')
     from .windows_input import TouchFilter
     try:
@@ -273,6 +335,16 @@ def main():
         label = f'{note["title"]} · {page+1} / {len(note["pages"])} 페이지'
         if page_label.get() != label:
             page_label.set(label)
+
+    redraw_job = None
+    def request_redraw():
+        nonlocal redraw_job
+        if redraw_job is None:
+            def frame():
+                nonlocal redraw_job
+                redraw_job = None
+                redraw()
+            redraw_job = root.after(16,frame)
 
     def choose(event=None):
         nonlocal note, page, gesture
@@ -431,7 +503,7 @@ def main():
         if color.get() not in [v for _,v in values]: color.set(values[0][1])
         for label, value in values:
             tk.Radiobutton(colors_frame,text=label,variable=color,value=value,fg=value,indicatoron=False,padx=12).pack(side='left',padx=2)
-        ttk.Label(colors_frame,text='  올가미: 둘러싸기 → 선택 영역 드래그 / 크기 ±').pack(side='left')
+        ttk.Label(colors_frame,text='  올가미: 둘러싸기 → 선택 영역 이동 / 모서리 드래그로 크기 조절').pack(side='left')
 
     for label in ('펜','형광펜','획 지우개','올가미'):
         ttk.Radiobutton(toolbar,text=label,value=label,variable=tool,command=palette).pack(side='left',padx=3)
@@ -450,19 +522,6 @@ def main():
         selection.clear(); redraw(); changed()
     ttk.Button(toolbar,text='↶ 취소',command=undo).pack(side='left',padx=4)
     ttk.Button(toolbar,text='↷ 재실행',command=lambda:undo(True)).pack(side='left')
-
-    def scale(factor):
-        if not selection or gesture: return
-        history().record(strokes())
-        pts = [p for i in selection for p in strokes()[i]['points']]
-        cx,cy = sum(p[0] for p in pts)/len(pts),sum(p[1] for p in pts)/len(pts)
-        for i in selection:
-            s=strokes()[i]
-            s['points']=[[cx+(x-cx)*factor,cy+(y-cy)*factor] for x,y in s['points']]
-            s['width']*=factor
-        redraw(); changed()
-    ttk.Button(footer,text='선택 −',command=lambda:scale(.9)).pack(side='left')
-    ttk.Button(footer,text='선택 +',command=lambda:scale(1.1)).pack(side='left',padx=4)
 
     def audio():
         nonlocal stream
@@ -501,7 +560,7 @@ def main():
     ttk.Button(footer,text='‹ 이전',command=lambda:turn(-1)).pack(side='right')
 
     def point(e):
-        return [max(0,min(1000,canvas.canvasx(e.x))),max(0,min(1400,canvas.canvasy(e.y)))]
+        return [max(0,min(1000,canvas.canvasx(e.x)/renderer.zoom)),max(0,min(1400,canvas.canvasy(e.y)/renderer.zoom))]
 
     def press(e, override=None):
         nonlocal gesture
@@ -511,8 +570,15 @@ def main():
         p=point(e)
         mode=override or tool.get()
         if mode=='올가미' and selection:
-            pts=[p for i in selection for p in strokes()[i]['points']]
-            if min(a[0] for a in pts)-8<=p[0]<=max(a[0] for a in pts)+8 and min(a[1] for a in pts)-8<=p[1]<=max(a[1] for a in pts)+8:
+            x0,y0,x1,y1 = selection_bounds(strokes(),selection)
+            for corner,anchor in (((x0,y0),(x1,y1)),((x1,y0),(x0,y1)),
+                                  ((x0,y1),(x1,y0)),((x1,y1),(x0,y0))):
+                if math.dist(p,corner) <= 12/renderer.zoom:
+                    history().record(strokes())
+                    gesture = dict(mode='resize',anchor=anchor,start=corner,
+                                   originals=copy.deepcopy([strokes()[i] for i in selection]))
+                    return
+            if x0<=p[0]<=x1 and y0<=p[1]<=y1:
                 history().record(strokes())
                 gesture=dict(mode='move',last=p)
                 return
@@ -521,7 +587,7 @@ def main():
         gesture=dict(mode=mode,points=[p],last=p,button=getattr(e,'num',1))
         if mode in ('펜','형광펜'):
             strokes().append(dict(tool=mode,color=color.get(),width=widths[mode].get(),points=[p]))
-            tracker.update(p[0]/1000,p[1]/1000,.6,True)
+            tracker.update(p[0]/1000,p[1]/1000,getattr(e,'pressure',.6),True)
         elif mode=='획 지우개': erase(p,p)
         redraw()
 
@@ -534,18 +600,21 @@ def main():
         mode=gesture['mode']
         if mode in ('펜','형광펜'):
             strokes()[-1]['points'].append(p)
-            tracker.update(p[0]/1000,p[1]/1000,.6,True)
+            tracker.update(p[0]/1000,p[1]/1000,getattr(e,'pressure',.6),True)
         elif mode=='획 지우개': erase(gesture['last'],p)
+        elif mode=='resize':
+            for i,stroke in zip(selection,resize_strokes(gesture['originals'],gesture['anchor'],gesture['start'],p)):
+                strokes()[i] = stroke
         elif mode=='move':
             dx,dy=p[0]-gesture['last'][0],p[1]-gesture['last'][1]
             for i in selection:
                 strokes()[i]['points']=[[x+dx,y+dy] for x,y in strokes()[i]['points']]
         else: gesture['points'].append(p)
         gesture['last']=p
-        redraw()
+        request_redraw()
         canvas.delete('lasso')
         if mode=='올가미' and len(gesture['points'])>1:
-            canvas.create_line(*[v for p in gesture['points'] for v in p],fill='#4263eb',dash=(4,3),tags='lasso')
+            canvas.create_line(*[v*renderer.zoom for p in gesture['points'] for v in p],fill='#4263eb',dash=(4,3),tags='lasso')
 
     def release(e):
         nonlocal gesture
@@ -555,17 +624,20 @@ def main():
             polygon=gesture['points']
             if len(polygon)>2:
                 selection[:]=[i for i,s in enumerate(strokes()) if stroke_intersects_polygon(s,polygon)]
-        elif gesture['mode'] != 'pan': changed()
+        elif gesture['mode'] not in ('pan','zoom'): changed()
         gesture=None
         canvas.delete('lasso')
         redraw()
-    space_down = False
-    def space(e, pressed):
-        nonlocal space_down
-        # Do not steal spaces from text entry controls.
-        if e.widget is canvas:
-            space_down = pressed
-            return 'break'
+    navigation_key = None
+    def navigation(e, pressed):
+        nonlocal navigation_key
+        if e.widget.winfo_class() in ('Entry','TEntry','Text','TCombobox'):
+            return
+        if e.state & (0x4 | 0x8 | 0x20000):
+            return
+        navigation_key = e.keysym.lower() if pressed else None
+        canvas.configure(cursor='fleur' if pressed and navigation_key=='a' else 'sizing' if pressed else '')
+        return 'break'
 
     right_down = False
     left_down = False
@@ -579,10 +651,15 @@ def main():
         left_down = True
         if right_held(e):
             press(e, '획 지우개')
-        elif space_down:
+        elif navigation_key == 'a':
             if gesture: release(None)
             canvas.scan_mark(e.x, e.y)
             gesture = dict(mode='pan')
+        elif navigation_key == 'w':
+            if gesture: release(None)
+            gesture = dict(mode='zoom',start_y=e.y,zoom=renderer.zoom,
+                           anchor=(canvas.canvasx(e.x)/renderer.zoom,canvas.canvasy(e.y)/renderer.zoom),
+                           screen=(e.x,e.y))
         else:
             press(e)
 
@@ -594,6 +671,15 @@ def main():
                 drag(e)
         elif gesture and gesture['mode']=='pan':
             canvas.scan_dragto(e.x,e.y,gain=1)
+            redraw()
+        elif gesture and gesture['mode']=='zoom':
+            zoom = max(.25,min(4,gesture['zoom']*math.exp((gesture['start_y']-e.y)/200)))
+            renderer.zoom = zoom
+            canvas.configure(scrollregion=(0,0,1000*zoom,1400*zoom))
+            ax,ay = gesture['anchor']; sx,sy = gesture['screen']
+            canvas.xview_moveto((ax*zoom-sx)/(1000*zoom))
+            canvas.yview_moveto((ay*zoom-sy)/(1400*zoom))
+            redraw()
         else:
             drag(e)
 
@@ -625,8 +711,9 @@ def main():
     canvas.bind('<ButtonRelease-3>',right_release)
     root.bind('<ButtonPress-3>',right_press)
     root.bind('<ButtonRelease-3>',right_release)
-    root.bind('<KeyPress-space>',lambda e:space(e,True))
-    root.bind('<KeyRelease-space>',lambda e:space(e,False))
+    for key in ('a','A','w','W'):
+        root.bind('<KeyPress-'+key+'>',lambda e:navigation(e,True))
+        root.bind('<KeyRelease-'+key+'>',lambda e:navigation(e,False))
     canvas.bind('<B1-Motion>',pointer_drag)
     canvas.bind('<ButtonRelease-1>',left_release)
     canvas.bind('<MouseWheel>',lambda e:canvas.yview_scroll(-1 if e.delta>0 else 1,'units'))
@@ -657,14 +744,66 @@ def main():
     root.bind('<Control-y>',lambda e:undo(True))
     root.bind('<Control-s>',lambda e:save())
 
+    from .pen_input import NativePen
+    from types import SimpleNamespace
+    try:
+        native_pen = NativePen(canvas)
+    except (OSError, AttributeError) as exc:
+        native_pen = None
+        messagebox.showwarning('Windows 펜 입력',f'직접 펜 입력을 켜지 못해 마우스 입력으로 동작합니다.\n{exc}')
+    pen_contact = False
+    pen_last = None
+    def poll_pen():
+        nonlocal pen_contact, pen_last
+        if native_pen:
+            while native_pen.samples:
+                x,y,contact,eraser,pressure = native_pen.samples.popleft()
+                if x is None:
+                    if pen_contact: left_release(pen_last)
+                    pen_contact = False
+                    continue
+                event = SimpleNamespace(x=x-canvas.winfo_rootx(),y=y-canvas.winfo_rooty(),
+                                        state=0x400 if eraser else 0,num=1,widget=canvas,pressure=pressure)
+                if contact:
+                    if not pen_contact:
+                        if navigation_key:
+                            left_press(event)
+                        else:
+                            press(event,'획 지우개' if eraser or right_held(event) else None)
+                    else:
+                        if not navigation_key and gesture and (gesture['mode']=='획 지우개') != bool(eraser or right_held(event)) and tool.get()!='획 지우개':
+                            press(event,'획 지우개' if eraser or right_held(event) else None)
+                        pointer_drag(event)
+                elif pen_contact:
+                    # Keep the up location too, even when a tiny stroke had no update.
+                    if gesture and gesture['mode'] in ('pan','zoom'):
+                        pointer_drag(event)
+                    elif gesture:
+                        drag(event)
+                    left_release(event)
+                pen_contact = contact
+                pen_last = event
+        root.after(4,poll_pen)
+    poll_pen()
+
     def close():
         if gesture: release(None)
         if not save():
             messagebox.showerror('저장 실패','저장하지 못했습니다. 저장 경로와 디스크를 확인하세요.')
             return
+        if redraw_job: root.after_cancel(redraw_job)
         if stream: stream.stop(); stream.close()
+        if native_pen: native_pen.close()
         touch_filter.close()
         root.destroy()
     root.protocol('WM_DELETE_WINDOW',close)
+    canvas.bind('<Configure>',lambda e:redraw())
+    def scrolled(*args):
+        sy.set(*args)
+        root.after_idle(redraw)
+    def scrolled_x(*args):
+        sx.set(*args)
+        root.after_idle(redraw)
+    canvas.configure(yscrollcommand=scrolled,xscrollcommand=scrolled_x)
     palette(); rebuild(); redraw(); save()
     root.mainloop()

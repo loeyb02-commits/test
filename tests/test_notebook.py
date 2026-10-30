@@ -77,6 +77,13 @@ class RecordingCanvas:
         self.created.append((self.next_id,coords,kw))
         return self.next_id
 
+    def canvasx(self,x): return x
+    def canvasy(self,y): return y
+    def winfo_width(self): return 1000
+    def winfo_height(self): return 800
+    def create_image(self,*coords,**kw):
+        return self.create_line(*coords,**kw)
+
     def create_rectangle(self,*coords,**kw):
         return self.create_line(*coords,**kw)
 
@@ -94,7 +101,7 @@ class RenderingTests(unittest.TestCase):
     def test_writing_keeps_background_and_existing_strokes(self):
         from penasmr.notebook import PageRenderer
         canvas=RecordingCanvas()
-        renderer=PageRenderer(canvas)
+        renderer=PageRenderer(canvas,photo_factory=lambda image:image)
         background_count=len(canvas.created)
         page=[dict(tool='펜',color='black',width=3,points=[[0,0]])]
         renderer.render(page,[])
@@ -154,3 +161,39 @@ class FolderAndButtonTests(unittest.TestCase):
         from penasmr.windows_input import right_button_pressed
         self.assertTrue(right_button_pressed(0x0400))
         self.assertTrue(right_button_pressed(0x0500))
+
+
+class VectorEditingTests(unittest.TestCase):
+    def test_smoothing_preserves_endpoints_and_subpixel_movement(self):
+        from penasmr.notebook import smooth_points
+        points = [[10,10],[10.2,10.3],[10.5,10.4],[11,11]]
+        result = smooth_points(points)
+        self.assertEqual(result[0],points[0])
+        self.assertEqual(result[-1],points[-1])
+        self.assertGreater(len(result),len(points))
+        self.assertTrue(all(10<=x<=11 and 10<=y<=11 for x,y in result))
+
+    def test_corner_scale_is_relative_to_original_and_undoable(self):
+        from penasmr.notebook import resize_strokes
+        original=[dict(tool='펜',color='black',width=2,points=[[10,10],[20,20]])]
+        scaled=resize_strokes(original,[0,0],[20,20],[40,40])
+        self.assertEqual(scaled[0]['points'],[[20,20],[40,40]])
+        self.assertEqual(scaled[0]['width'],4)
+        self.assertEqual(original[0]['width'],2)
+        restored=resize_strokes(original,[0,0],[20,20],[20,20])
+        self.assertEqual(restored,original)
+
+    def test_zoom_rasterizes_vectors_again_instead_of_enlarging_bitmap(self):
+        from penasmr.notebook import PageRenderer
+        canvas=RecordingCanvas()
+        renderer=PageRenderer(canvas,photo_factory=lambda image:image)
+        stroke=dict(tool='펜',color='black',width=3,points=[[10,10],[20,20]])
+        renderer.render([stroke],[])
+        small=renderer.images[0].size
+        renderer.zoom=2
+        renderer.render([stroke],[])
+        large=renderer.images[0].size
+        self.assertGreater(large[0],small[0])
+        self.assertEqual(stroke['points'],[[10,10],[20,20]])
+        alpha=renderer.images[0].getchannel('A')
+        self.assertTrue(any(0<v<255 for v in alpha.getdata()))

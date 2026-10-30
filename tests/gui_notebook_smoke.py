@@ -7,6 +7,12 @@ from unittest.mock import patch
 import tkinter as tk
 from tkinter import ttk
 from penasmr.notebook import main, Library
+from penasmr.pen_input import NativePen
+pen_devices=[]
+def capture_pen(canvas):
+    device=NativePen(canvas)
+    pen_devices.append(device)
+    return device
 errors=[]
 def test(root):
     root.report_callback_exception=lambda *args:errors.append(args)
@@ -76,6 +82,52 @@ def test(root):
     for key,expected in [('v','올가미'),('e','획 지우개'),('S','펜')]:
         canvas.event_generate('<KeyPress-'+key+'>'); root.update()
         assert root.getvar(pen_button.cget('variable'))==expected
+    # Direct Windows Ink sample delivery keeps very short movements and barrel erasing.
+    device=pen_devices[-1]
+    cx,cy=canvas.winfo_rootx(),canvas.winfo_rooty()
+    device.samples.extend([(cx+400,cy+200,True,False,.5),
+                           (cx+401,cy+201,True,False,.5),
+                           (cx+402,cy+202,True,False,.5),
+                           (cx+402,cy+202,False,False,0)])
+    root.tk.call('after',10); root.update()
+    assert len(canvas.find_all())==count+2
+    canvas.event_generate('<Control-s>'); root.update()
+    short=Library(Path(os.environ['LOCALAPPDATA'])/'PenNotes/library.json').data['notes'][0]['pages'][0][-1]
+    assert len(short['points'])>=3
+    assert short['points'][0] != short['points'][-1]
+    device.samples.extend([(cx+401,cy+201,True,True,.5),(cx+401,cy+201,False,False,0)])
+    root.tk.call('after',10); root.update()
+    assert len(canvas.find_all())==count+1
+    # Corner handles resize the selection live; a single undo restores the stroke.
+    canvas.event_generate('<KeyPress-v>'); root.update()
+    canvas.event_generate('<ButtonPress-1>',x=80,y=80)
+    for x,y in ((320,80),(320,130),(80,130),(80,80)):
+        canvas.event_generate('<B1-Motion>',x=x,y=y)
+    canvas.event_generate('<ButtonRelease-1>',x=80,y=80); root.update()
+    handles=canvas.find_withtag('selection')
+    assert len(handles)==5
+    x0,y0,x1,y1=canvas.coords(handles[0])
+    canvas.event_generate('<ButtonPress-1>',x=round(x1),y=round(y1))
+    canvas.event_generate('<B1-Motion>',x=round(x1+90),y=round(y1+30))
+    root.tk.call('after',20); root.update()
+    grown=canvas.coords(canvas.find_withtag('selection')[0])
+    assert grown[2]-grown[0]>x1-x0
+    canvas.event_generate('<ButtonRelease-1>',x=round(x1+90),y=round(y1+30)); root.update()
+    next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='↶ 취소').invoke(); root.update()
+    canvas.event_generate('<KeyPress-s>'); root.update()
+    # W-drag zooms the camera and leaves stored vector points untouched.
+    canvas.event_generate('<KeyPress-w>')
+    canvas.event_generate('<ButtonPress-1>',x=200,y=200)
+    canvas.event_generate('<B1-Motion>',x=200,y=100)
+    canvas.event_generate('<ButtonRelease-1>',x=200,y=100)
+    canvas.event_generate('<KeyRelease-w>'); root.update()
+    assert float(canvas.cget('scrollregion').split()[2])>1000
+    canvas.event_generate('<KeyPress-w>')
+    canvas.event_generate('<ButtonPress-1>',x=200,y=100)
+    canvas.event_generate('<B1-Motion>',x=200,y=200)
+    canvas.event_generate('<ButtonRelease-1>',x=200,y=200)
+    canvas.event_generate('<KeyRelease-w>'); root.update()
+    assert abs(float(canvas.cget('scrollregion').split()[2])-1000)<.01
     add.invoke(); root.update()
     assert len(canvas.find_all())==count
     canvas.focus_force(); root.update()
@@ -92,11 +144,11 @@ def test(root):
     # Drag the paper without creating ink.
     canvas.yview_moveto(.4)
     old=canvas.yview()
-    canvas.event_generate('<KeyPress-space>')
+    canvas.event_generate('<KeyPress-a>')
     canvas.event_generate('<ButtonPress-1>',x=200,y=200)
     canvas.event_generate('<B1-Motion>',x=200,y=300)
     canvas.event_generate('<ButtonRelease-1>',x=200,y=300)
-    canvas.event_generate('<KeyRelease-space>')
+    canvas.event_generate('<KeyRelease-a>')
     root.update()
     assert canvas.yview()[0]<old[0]
     assert len(canvas.find_all())==count
@@ -149,8 +201,8 @@ def test(root):
     assert data['order'].index(second)<data['order'].index(old_child)
     assert next(n for n in data['notes'] if n['id']==second)['folder']==folder_b
     assert not errors,errors
-    print('GUI PASS: held-right + pen eraser, shortcuts, auto page, folder reorder, top insertion, drawing, sliders and save')
+    print('GUI PASS: direct pen samples/barrel eraser, short stroke, live corner resize/undo, A pan, W zoom, shortcuts, folders, save')
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as data_dir:
-        with patch.dict(os.environ, {'LOCALAPPDATA': data_dir}), patch.object(tk.Tk, 'mainloop', test):
+        with patch.dict(os.environ, {'LOCALAPPDATA': data_dir}), patch.object(tk.Tk, 'mainloop', test), patch('penasmr.pen_input.NativePen',capture_pen):
             main()
