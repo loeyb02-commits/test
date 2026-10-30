@@ -47,14 +47,59 @@ def test(root):
         next(w for w in widgets if isinstance(w,ttk.Radiobutton) and w.cget('text')==mode).invoke()
         root.update()
     assert pen.get()==6.5 and marker.get()>16
+    pen_button=next(w for w in widgets if isinstance(w,ttk.Radiobutton) and w.cget('text')=='펜')
+    pen_button.invoke()
+    # Right-drag deletes a whole stroke and does not change the selected tool.
+    canvas.event_generate('<ButtonPress-3>',x=100,y=100)
+    canvas.event_generate('<B3-Motion>',x=150,y=110)
+    canvas.event_generate('<ButtonRelease-3>',x=150,y=110)
+    root.update()
+    assert len(canvas.find_all())==count
+    assert root.getvar(pen_button.cget('variable'))=='펜'
+    next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='↶ 취소').invoke()
+    root.update()
+    assert len(canvas.find_all())==count+1
     add.invoke(); root.update()
     assert len(canvas.find_all())==count
+    canvas.focus_force(); root.update()
+    canvas.event_generate('<Left>'); root.update()
+    assert len(canvas.find_all())==count+1
+    canvas.event_generate('<Right>'); root.update()
+    assert len(canvas.find_all())==count
+    # Drag the paper without creating ink.
+    canvas.yview_moveto(.4)
+    old=canvas.yview()
+    canvas.event_generate('<KeyPress-space>')
+    canvas.event_generate('<ButtonPress-1>',x=200,y=200)
+    canvas.event_generate('<B1-Motion>',x=200,y=300)
+    canvas.event_generate('<ButtonRelease-1>',x=200,y=300)
+    canvas.event_generate('<KeyRelease-space>')
+    root.update()
+    assert canvas.yview()[0]<old[0]
+    assert len(canvas.find_all())==count
+    # Notes visibly follow the drag, and their new order is persisted.
+    from tkinter import simpledialog
+    with patch.object(simpledialog,'askstring',return_value='두 번째 노트'):
+        next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='새 노트').invoke()
+    root.update()
+    tree=next(w for w in widgets if isinstance(w,ttk.Treeview))
+    first,second=tree.get_children('')
+    x0,y0,w0,h0=tree.bbox(first)
+    x1,y1,w1,h1=tree.bbox(second)
+    tree.event_generate('<ButtonPress-1>',x=60,y=y1+h1//2)
+    tree.event_generate('<B1-Motion>',x=60,y=y0+1)
+    root.update()
+    assert tree.get_children('')[0]==second
+    assert any(w.winfo_manager()=='place' for w in tree.winfo_children())
+    tree.event_generate('<ButtonRelease-1>',x=60,y=y0+1)
+    root.update()
     root.tk.call(root.protocol('WM_DELETE_WINDOW'))
     data=Library(Path(os.environ['LOCALAPPDATA'])/'PenNotes/library.json').data
-    assert len(data['notes'][0]['pages'])==2
-    assert len(data['notes'][0]['pages'][0])==1
+    assert data['notes'][0]['title']=='두 번째 노트'
+    assert len(data['notes'][1]['pages'])==2
+    assert len(data['notes'][1]['pages'][0])==1
     assert not errors,errors
-    print('GUI PASS: draw, stable page controls, independent thickness, slider thumb drag, tool switch, add page, save')
+    print('GUI PASS: drawing, sliders, right-button eraser/undo, arrow pages, paper pan, live note drag/reorder, save')
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as data_dir:
         with patch.dict(os.environ, {'LOCALAPPDATA': data_dir}), patch.object(tk.Tk, 'mainloop', test):

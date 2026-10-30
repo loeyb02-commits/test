@@ -110,6 +110,16 @@ class Library:
         self.data['notes'].append(item)
         return item
 
+    def move_note(self, note_id, folder=None, before=None):
+        notes = self.data['notes']
+        item = next(n for n in notes if n['id']==note_id)
+        if before == note_id:
+            return
+        item['folder'] = folder
+        notes.remove(item)
+        index = next((i for i,n in enumerate(notes) if n['id']==before), len(notes))
+        notes.insert(index, item)
+
 
 class History:
     def __init__(self):
@@ -135,11 +145,19 @@ def main():
     root = tk.Tk()
     root.title('종이 · 필기 노트')
     root.geometry('1280x900')
+    from .windows_input import TouchFilter
+    try:
+        touch_filter = TouchFilter()
+    except OSError as exc:
+        messagebox.showerror('터치 입력 차단 실패', str(exc))
+        root.destroy()
+        return
     path = Path(os.environ.get('LOCALAPPDATA', Path.home() / '.local/share')) / 'PenNotes' / 'library.json'
     try:
         library = Library(path)
     except (ValueError, OSError) as exc:
         messagebox.showerror('노트 열기 실패', f'{path}\n{exc}\n원본 파일을 보존하고 종료합니다.')
+        touch_filter.close()
         root.destroy()
         return
     if not library.data['notes']:
@@ -243,6 +261,60 @@ def main():
             redraw()
 
     tree.bind('<<TreeviewSelect>>', choose)
+
+    tree_drag = {}
+    ghost = ttk.Label(tree, padding=6, relief='solid')
+
+    def note_press(e):
+        row = tree.identify_row(e.y)
+        if any(n['id']==row for n in library.data['notes']):
+            tree_drag.update(id=row, x=e.x, y=e.y, active=False)
+
+    def note_drag(e):
+        if not tree_drag:
+            return
+        if not tree_drag['active'] and math.hypot(e.x-tree_drag['x'],e.y-tree_drag['y']) < 6:
+            return
+        tree_drag['active'] = True
+        dragged = tree_drag['id']
+        ghost.configure(text=tree.item(dragged,'text'))
+        ghost.place(x=e.x+12,y=e.y+8)
+        ghost.lift()
+        if e.y < 20:
+            tree.yview_scroll(-1,'units')
+        elif e.y > tree.winfo_height()-20:
+            tree.yview_scroll(1,'units')
+        target = tree.identify_row(e.y)
+        if target == dragged:
+            return 'break'
+        folders = {f['id'] for f in library.data['folders']}
+        if target in folders:
+            tree.item(target,open=True)
+            tree.move(dragged,target,'end')
+        elif target:
+            parent = tree.parent(target)
+            _, y, _, height = tree.bbox(target)
+            index = tree.index(target) + (e.y > y+height/2)
+            tree.move(dragged,parent,index)
+        else:
+            tree.move(dragged,'','end')
+        return 'break'
+
+    def note_drop(e):
+        ghost.place_forget()
+        if tree_drag.get('active'):
+            dragged = tree_drag['id']
+            parent = tree.parent(dragged)
+            siblings = list(tree.get_children(parent))
+            next_note = next((row for row in siblings[siblings.index(dragged)+1:]
+                              if any(n['id']==row for n in library.data['notes'])), None)
+            library.move_note(dragged, parent or None, next_note)
+            changed()
+        tree_drag.clear()
+
+    tree.bind('<ButtonPress-1>',note_press,add='+')
+    tree.bind('<B1-Motion>',note_drag,add='+')
+    tree.bind('<ButtonRelease-1>',note_drop,add='+')
 
     def selected_folder():
         ids = tree.selection()
@@ -386,10 +458,13 @@ def main():
     def point(e):
         return [max(0,min(1000,canvas.canvasx(e.x))),max(0,min(1400,canvas.canvasy(e.y)))]
 
-    def press(e):
+    def press(e, override=None):
         nonlocal gesture
+        if gesture:
+            release(None)
+        canvas.focus_set()
         p=point(e)
-        mode=tool.get()
+        mode=override or tool.get()
         if mode=='올가미' and selection:
             pts=[p for i in selection for p in strokes()[i]['points']]
             if min(a[0] for a in pts)-8<=p[0]<=max(a[0] for a in pts)+8 and min(a[1] for a in pts)-8<=p[1]<=max(a[1] for a in pts)+8:
@@ -398,7 +473,7 @@ def main():
                 return
         selection.clear()
         if mode!='올가미': history().record(strokes())
-        gesture=dict(mode=mode,points=[p],last=p)
+        gesture=dict(mode=mode,points=[p],last=p,button=getattr(e,'num',1))
         if mode in ('펜','형광펜'):
             strokes().append(dict(tool=mode,color=color.get(),width=widths[mode].get(),points=[p]))
             tracker.update(p[0]/1000,p[1]/1000,.6,True)
@@ -435,16 +510,62 @@ def main():
             polygon=gesture['points']
             if len(polygon)>2:
                 selection[:]=[i for i,s in enumerate(strokes()) if stroke_intersects_polygon(s,polygon)]
-        else: changed()
+        elif gesture['mode'] != 'pan': changed()
         gesture=None
         canvas.delete('lasso')
         redraw()
-    canvas.bind('<ButtonPress-1>',press)
-    canvas.bind('<B1-Motion>',drag)
-    canvas.bind('<ButtonRelease-1>',release)
+    space_down = False
+    def space(e, pressed):
+        nonlocal space_down
+        # Do not steal spaces from text entry controls.
+        if e.widget is canvas:
+            space_down = pressed
+            return 'break'
+
+    def left_press(e):
+        nonlocal gesture
+        if space_down:
+            if gesture: release(None)
+            canvas.scan_mark(e.x, e.y)
+            gesture = dict(mode='pan')
+        else:
+            press(e)
+
+    original_drag = drag
+    def pointer_drag(e):
+        if gesture and gesture['mode']=='pan':
+            canvas.scan_dragto(e.x,e.y,gain=1)
+        else:
+            original_drag(e)
+
+    def left_release(e):
+        if gesture and gesture.get('button') == 3:
+            return
+        release(e)
+
+    def right_release(e):
+        if gesture and gesture.get('button') == 3:
+            release(e)
+
+    canvas.bind('<ButtonPress-1>',left_press)
+    canvas.bind('<ButtonPress-3>',lambda e:press(e, '획 지우개'))
+    canvas.bind('<B3-Motion>',pointer_drag)
+    canvas.bind('<ButtonRelease-3>',right_release)
+    root.bind('<KeyPress-space>',lambda e:space(e,True))
+    root.bind('<KeyRelease-space>',lambda e:space(e,False))
+    canvas.bind('<B1-Motion>',pointer_drag)
+    canvas.bind('<ButtonRelease-1>',left_release)
     canvas.bind('<MouseWheel>',lambda e:canvas.yview_scroll(-1 if e.delta>0 else 1,'units'))
     canvas.bind('<Button-4>',lambda e:canvas.yview_scroll(-1,'units'))
     canvas.bind('<Button-5>',lambda e:canvas.yview_scroll(1,'units'))
+    def page_key(e, delta):
+        # Sliders and entry controls retain their native arrow-key behavior.
+        if e.widget.winfo_class() not in ('Entry', 'TEntry', 'Text', 'TCombobox',
+                                          'Scale', 'TScale', 'Treeview'):
+            turn(delta)
+            return 'break'
+    root.bind('<Left>',lambda e:page_key(e,-1))
+    root.bind('<Right>',lambda e:page_key(e,1))
     root.bind('<Control-z>',lambda e:undo())
     root.bind('<Control-y>',lambda e:undo(True))
     root.bind('<Control-s>',lambda e:save())
@@ -455,6 +576,7 @@ def main():
             messagebox.showerror('저장 실패','저장하지 못했습니다. 저장 경로와 디스크를 확인하세요.')
             return
         if stream: stream.stop(); stream.close()
+        touch_filter.close()
         root.destroy()
     root.protocol('WM_DELETE_WINDOW',close)
     palette(); rebuild(); redraw(); save()

@@ -109,3 +109,27 @@ class RenderingTests(unittest.TestCase):
         renderer.render([],[])
         self.assertIn(stroke_id,canvas.deleted)
         self.assertEqual(renderer.items,[])
+
+
+class InputTests(unittest.TestCase):
+    def test_windows_touch_signature_keeps_pen_and_mouse(self):
+        from penasmr.windows_input import is_touch_mouse
+        self.assertTrue(is_touch_mouse(0xFF515780))
+        self.assertTrue(is_touch_mouse(0xFF5157FF))
+        self.assertTrue(is_touch_mouse(0xFF515780 - (1 << 32)))  # signed LPARAM
+        self.assertFalse(is_touch_mouse(0xFF515700))  # pen
+        self.assertFalse(is_touch_mouse(0))  # physical mouse
+        self.assertFalse(is_touch_mouse(0x12345680))
+
+    def test_note_reorder_and_folder_move_survive_reload(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib=Library(Path(d)/'library.json')
+            folder=lib.folder('폴더')
+            a,b,c=[lib.note(name) for name in ('A','B','C')]
+            lib.move_note(c['id'],before=a['id'])
+            self.assertEqual([n['title'] for n in lib.data['notes']],['C','A','B'])
+            lib.move_note(a['id'],folder['id'])
+            lib.save()
+            restored=Library(lib.path)
+            self.assertEqual(restored.data,lib.data)
+            self.assertEqual(restored.data['notes'][-1]['folder'],folder['id'])
