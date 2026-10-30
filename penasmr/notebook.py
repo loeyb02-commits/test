@@ -46,6 +46,11 @@ def stroke_intersects_polygon(stroke, polygon):
                for c, d in edges)
 
 
+def radial_zoom(initial_zoom, start, current, center):
+    delta = math.dist(current,center)-math.dist(start,center)
+    return max(.25,min(4,initial_zoom*math.exp(max(-10,min(10,delta/200)))))
+
+
 def selection_bounds(strokes, selection):
     selected = [strokes[i] for i in selection]
     return (min(p[0]-s['width']/2 for s in selected for p in s['points'])-8,
@@ -73,7 +78,7 @@ class PageRenderer:
         self.items, self.snapshot = [], []
         self.zoom = 1.
         self.last_zoom = None
-        self.lines = [canvas.create_line(0,y,1000,y,fill='#ecece7') for y in range(40,1400,32)]
+        self.lines = [canvas.create_line(0,y,1000,y,fill='#ecece7',tags='paper') for y in range(40,1400,32)]
 
     def render(self, strokes, selection):
         canvas, zoom = self.canvas, self.zoom
@@ -84,17 +89,20 @@ class PageRenderer:
         while len(self.items)>len(strokes):
             canvas.delete(self.items.pop())
             self.snapshot.pop()
+        layers_changed = False
         for i,stroke in enumerate(strokes):
             points = stroke['points']
             # Editing replaces the point list; drawing appends to it. No full-page copy.
             key = (id(stroke),id(points),len(points),stroke['width'],stroke['color'],stroke['tool'],zoom)
             if i<len(self.snapshot) and self.snapshot[i]==key:
                 continue
+            layers_changed = True
             coords = [value*zoom for point in points for value in point]
             if len(coords)==2:
                 coords += [coords[0]+.01,coords[1]]
             options = dict(fill=stroke['color'],width=stroke['width']*zoom,
                            capstyle='round',joinstyle='round',smooth=False,
+                           tags='highlighter' if stroke['tool']=='형광펜' else 'ink',
                            stipple='gray50' if stroke['tool']=='형광펜' else '')
             if i<len(self.items):
                 canvas.coords(self.items[i],*coords)
@@ -103,6 +111,8 @@ class PageRenderer:
             else:
                 self.items.append(canvas.create_line(*coords,**options))
                 self.snapshot.append(key)
+        if layers_changed:
+            canvas.tag_raise('ink')
         canvas.delete('selection')
         if selection:
             x0,y0,x1,y1 = [v*zoom for v in selection_bounds(strokes,selection)]
@@ -460,6 +470,7 @@ def main():
         ttk.Button(side,text=label,command=cmd).pack(fill='x', pady=3)
 
     def palette():
+        canvas.configure(cursor={'이동':'fleur','확대':'sizing'}.get(tool.get(),''))
         for w in colors_frame.winfo_children(): w.destroy()
         values = [('검정','#202124'),('빨강','#e03131'),('파랑','#1971c2'),('초록','#2b8a3e'),('보라','#862e9c')]
         if tool.get()=='형광펜':
@@ -469,7 +480,7 @@ def main():
             tk.Radiobutton(colors_frame,text=label,variable=color,value=value,fg=value,indicatoron=False,padx=12).pack(side='left',padx=2)
         ttk.Label(colors_frame,text='  올가미: 둘러싸기 → 선택 영역 이동 / 모서리 드래그로 크기 조절').pack(side='left')
 
-    for label in ('펜','형광펜','획 지우개','올가미'):
+    for label in ('펜','형광펜','획 지우개','올가미','이동','확대'):
         ttk.Radiobutton(toolbar,text=label,value=label,variable=tool,command=palette).pack(side='left',padx=3)
     thickness = ttk.Frame(main_frame, padding=(8, 4))
     thickness.pack(before=colors_frame, fill='x')
@@ -592,17 +603,6 @@ def main():
         gesture=None
         canvas.delete('lasso')
         redraw()
-    navigation_key = None
-    def navigation(e, pressed):
-        nonlocal navigation_key
-        if e.widget.winfo_class() in ('Entry','TEntry','Text','TCombobox'):
-            return
-        if e.state & (0x4 | 0x8 | 0x20000):
-            return
-        navigation_key = e.keysym.lower() if pressed else None
-        canvas.configure(cursor='fleur' if pressed and navigation_key=='a' else 'sizing' if pressed else '')
-        return 'break'
-
     right_down = False
     left_down = False
 
@@ -615,13 +615,13 @@ def main():
         left_down = True
         if right_held(e):
             press(e, '획 지우개')
-        elif navigation_key == 'a':
+        elif tool.get() == '이동':
             if gesture: release(None)
             canvas.scan_mark(e.x, e.y)
             gesture = dict(mode='pan')
-        elif navigation_key == 'w':
+        elif tool.get() == '확대':
             if gesture: release(None)
-            gesture = dict(mode='zoom',start_y=e.y,zoom=renderer.zoom,
+            gesture = dict(mode='zoom',start=(e.x,e.y),center=(canvas.winfo_width()/2,canvas.winfo_height()/2),zoom=renderer.zoom,
                            anchor=(canvas.canvasx(e.x)/renderer.zoom,canvas.canvasy(e.y)/renderer.zoom),
                            screen=(e.x,e.y))
         else:
@@ -637,12 +637,13 @@ def main():
             canvas.scan_dragto(e.x,e.y,gain=1)
             redraw()
         elif gesture and gesture['mode']=='zoom':
-            zoom = max(.25,min(4,gesture['zoom']*math.exp((gesture['start_y']-e.y)/200)))
+            zoom = radial_zoom(gesture['zoom'],gesture['start'],(e.x,e.y),gesture['center'])
             renderer.zoom = zoom
-            canvas.configure(scrollregion=(0,0,1000*zoom,1400*zoom))
+            vw,vh = canvas.winfo_width(),canvas.winfo_height()
+            canvas.configure(scrollregion=(-vw,-vh,1000*zoom+vw,1400*zoom+vh))
             ax,ay = gesture['anchor']; sx,sy = gesture['screen']
-            canvas.xview_moveto((ax*zoom-sx)/(1000*zoom))
-            canvas.yview_moveto((ay*zoom-sy)/(1400*zoom))
+            canvas.xview_moveto((ax*zoom-sx+vw)/(1000*zoom+2*vw))
+            canvas.yview_moveto((ay*zoom-sy+vh)/(1400*zoom+2*vh))
             redraw()
         else:
             drag(e)
@@ -665,7 +666,7 @@ def main():
         if gesture and gesture['mode']=='획 지우개':
             release(e)
             if left_down and e.widget is canvas:
-                press(e)
+                left_press(e)
         if e.widget is canvas:
             return 'break'
 
@@ -675,9 +676,6 @@ def main():
     canvas.bind('<ButtonRelease-3>',right_release)
     root.bind('<ButtonPress-3>',right_press)
     root.bind('<ButtonRelease-3>',right_release)
-    for key in ('a','A','w','W'):
-        root.bind('<KeyPress-'+key+'>',lambda e:navigation(e,True))
-        root.bind('<KeyRelease-'+key+'>',lambda e:navigation(e,False))
     canvas.bind('<B1-Motion>',pointer_drag)
     canvas.bind('<ButtonRelease-1>',left_release)
     canvas.bind('<MouseWheel>',lambda e:canvas.yview_scroll(-1 if e.delta>0 else 1,'units'))
@@ -696,13 +694,13 @@ def main():
             return  # preserve Ctrl/Alt shortcuts
         if e.widget.winfo_class() in ('Entry','TEntry','Text','TCombobox'):
             return
-        selected = {'s':'펜', 'v':'올가미', 'e':'획 지우개'}.get(e.keysym.lower())
+        selected = {'s':'펜', 'v':'올가미', 'e':'획 지우개', 'a':'이동', 'w':'확대'}.get(e.keysym.lower())
         if selected:
             if gesture: release(None)
             tool.set(selected)
             palette()
             return 'break'
-    for key in ('s','S','v','V','e','E'):
+    for key in ('s','S','v','V','e','E','a','A','w','W'):
         root.bind('<KeyPress-'+key+'>',tool_key)
     root.bind('<Control-z>',lambda e:undo())
     root.bind('<Control-y>',lambda e:undo(True))
@@ -730,12 +728,12 @@ def main():
                                         state=0x400 if eraser else 0,num=1,widget=canvas,pressure=pressure)
                 if contact:
                     if not pen_contact:
-                        if navigation_key:
+                        if tool.get() in ('이동','확대'):
                             left_press(event)
                         else:
                             press(event,'획 지우개' if eraser or right_held(event) else None)
                     else:
-                        if not navigation_key and gesture and (gesture['mode']=='획 지우개') != bool(eraser or right_held(event)) and tool.get()!='획 지우개':
+                        if tool.get() not in ('이동','확대') and gesture and (gesture['mode']=='획 지우개') != bool(eraser or right_held(event)) and tool.get()!='획 지우개':
                             press(event,'획 지우개' if eraser or right_held(event) else None)
                         pointer_drag(event)
                 elif pen_contact:

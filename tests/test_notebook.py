@@ -93,6 +93,9 @@ class RecordingCanvas:
     def coords(self,item,*coords):
         self.updated.append(item)
 
+    def tag_raise(self,tag):
+        pass
+
     def itemconfigure(self,item,**kw):
         pass
 
@@ -199,3 +202,12 @@ class VectorEditingTests(unittest.TestCase):
         page[-1]['points'].append([21,21])
         renderer.render(page,[])
         self.assertEqual(canvas.updated,[renderer.items[-1]])
+
+
+class RadialZoomTests(unittest.TestCase):
+    def test_radial_distance_controls_zoom_from_each_gesture_start(self):
+        from penasmr.notebook import radial_zoom
+        self.assertGreater(radial_zoom(1,(300,200),(400,200),(200,200)),1)
+        self.assertLess(radial_zoom(1,(300,200),(250,200),(200,200)),1)
+        self.assertEqual(radial_zoom(1,(300,200),(200,300),(200,200)),1)
+        self.assertEqual(radial_zoom(2,(100,100),(100,100),(200,200)),2)

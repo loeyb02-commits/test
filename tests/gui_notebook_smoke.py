@@ -117,17 +117,24 @@ def test(root):
     canvas.event_generate('<KeyPress-s>'); root.update()
     # W-drag zooms the camera and leaves stored vector points untouched.
     canvas.event_generate('<KeyPress-w>')
+    canvas.event_generate('<KeyRelease-w>'); root.update()
+    assert root.getvar(pen_button.cget('variable'))=='확대'
+    anchor=(canvas.canvasx(200),canvas.canvasy(200))
     canvas.event_generate('<ButtonPress-1>',x=200,y=200)
     canvas.event_generate('<B1-Motion>',x=200,y=100)
     canvas.event_generate('<ButtonRelease-1>',x=200,y=100)
     canvas.event_generate('<KeyRelease-w>'); root.update()
-    assert float(canvas.cget('scrollregion').split()[2])>1000
+    z=canvas.coords(canvas.find_all()[0])[2]/1000
+    assert abs(canvas.canvasx(200)/z-anchor[0])<2
+    assert abs(canvas.canvasy(200)/z-anchor[1])<2
+    assert canvas.coords(canvas.find_all()[0])[2]>1000
+    assert root.getvar(pen_button.cget('variable'))=='확대'
     canvas.event_generate('<KeyPress-w>')
     canvas.event_generate('<ButtonPress-1>',x=200,y=100)
     canvas.event_generate('<B1-Motion>',x=200,y=200)
     canvas.event_generate('<ButtonRelease-1>',x=200,y=200)
     canvas.event_generate('<KeyRelease-w>'); root.update()
-    assert abs(float(canvas.cget('scrollregion').split()[2])-1000)<.01
+    assert abs(canvas.coords(canvas.find_all()[0])[2]-1000)<.01
     add.invoke(); root.update()
     assert len(canvas.find_all())==count
     canvas.focus_force(); root.update()
@@ -192,6 +199,17 @@ def test(root):
     old_child=tree.get_children(folder_b)[0]
     drag_row(second,folder_b,centre=True)
     assert tree.get_children(folder_b)==(second,old_child)
+    # A marker drawn after ink still sits behind every pen stroke.
+    canvas.event_generate('<KeyPress-s>'); root.update()
+    canvas.event_generate('<ButtonPress-1>',x=150,y=150)
+    canvas.event_generate('<B1-Motion>',x=300,y=150)
+    canvas.event_generate('<ButtonRelease-1>',x=300,y=150)
+    next(w for w in widgets if isinstance(w,ttk.Radiobutton) and w.cget('text')=='형광펜').invoke()
+    canvas.event_generate('<ButtonPress-1>',x=150,y=150)
+    canvas.event_generate('<B1-Motion>',x=300,y=150)
+    canvas.event_generate('<ButtonRelease-1>',x=300,y=150); root.update()
+    order=list(canvas.find_all())
+    assert max(order.index(i) for i in canvas.find_withtag('highlighter'))<min(order.index(i) for i in canvas.find_withtag('ink'))
     root.tk.call(root.protocol('WM_DELETE_WINDOW'))
     data=Library(Path(os.environ['LOCALAPPDATA'])/'PenNotes/library.json').data
     original=next(n for n in data['notes'] if n['title']=='첫 번째 노트')
