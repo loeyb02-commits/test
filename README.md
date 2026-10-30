@@ -4,6 +4,8 @@ OneNote를 그대로 사용하면서 Wintab이 제공하는 펜 좌표·필압�
 이동 속도에 따라 공간 텍스처를 진행시켜 연필 마찰음을 합성합니다.
 **Windows/Wacom 실기 검증 전의 프로토타입입니다. OneNote 동시 수집 성공을 보장하지 않습니다.**
 
+WTOpen 초기화 오류 수정과 재검증 절차: [상세 진단 안내](docs/WINTAB-DIAGNOSIS.md).
+
 ## 실행
 
 1. Windows 11에 공식 Wacom 드라이버와 Python **3.13 x64**(Tk 포함)를 설치합니다.
@@ -26,7 +28,9 @@ Windows에서 `build.cmd` 실행 후 `dist\PenASMR\PenASMR.exe`를 실행합니�
 
 ## 입력 방식 검토 및 구현
 
-* Wintab: `WTI_DEFSYSCTX` 기반 시스템/펜 컨텍스트, 절대 좌표와 압력 패킷,
+* Wintab: `WTI_DEFSYSCTX` 기반 시스템 컨텍스트부터 시도하고 digitizer/ANSI 호환 경로를 사용.
+  CXO_PEN은 요청하지 않으며, 비활성 생성 후 WTOverlap(FALSE)로 우선순위를 낮추고 활성화.
+  장치 기능·구조체 크기·협상된 패킷 ABI를 확인하고 자동 시작 로그를 저장. 절대 좌표와 압력 패킷,
   정확한 ctypes 함수 포인터/64비트 HANDLE 선언, `WTPacketsGet`으로 4ms 간격 폴링.
   `WTOverlap(TRUE)`를 호출하지 않아 OneNote 위로 컨텍스트를 승격하지 않습니다.
   메시지 수신 구현에 의존하지 않으므로 잘못된 WM_PACKET 처리 문제를 피합니다.
@@ -38,6 +42,7 @@ Windows에서 `build.cmd` 실행 후 `dist\PenASMR\PenASMR.exe`를 실행합니�
   실제 장치가 내보내는 HID usage/report descriptor를 확인하고 압력·접촉 비트를
   HidP API로 해석해야 합니다. PTH-451의 보고서 형식을 추측하지 않았습니다.
   이 저장소에는 Raw HID 또는 Ink 대체 백엔드가 아직 없습니다.
+  `--hid-info`는 대체 가능성 판단에 필요한 조회 전용 장치 목록을 저장합니다.
 
 압력 범위는 드라이버 DVC_NPRESSURE에서 조회하므로 2048을 하드코딩하지 않습니다.
 접촉은 압력이 0보다 큰 것으로 판단합니다. 별도 tip-switch가 필요한 드라이버는 추가 구현이 필요합니다.
@@ -93,8 +98,8 @@ python -m compileall -q penasmr run.py
 ```
 
 Linux에서 모션/합성 테스트를 실행할 수 있습니다. Windows 입력·장치 출력은
-Windows에서 위 절차로 별도 검증해야 합니다. 테스트 4개는 호버/첫 접촉,
-이동 속도, 압력 에너지 변화, 정지·오래된 입력·음소거, 출력 범위를 검사합니다.
+Windows에서 위 절차로 별도 검증해야 합니다. 테스트는 모의 드라이버를 이용한 초기화/실패/ABI/Raw Input 조회와 호버/첫 접촉,
+이동 속도, 압력 에너지 변화, 정지·오래된 입력·음소거, 출력 범위를 검사합니다. Windows 실기 검증을 대신하지 않습니다.
 Tk와 ctypes는 Python 표준 라이브러리이며 런타임 외부 의존성은 sounddevice입니다.
 
 ## 라이선스
