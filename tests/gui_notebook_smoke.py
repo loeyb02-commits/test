@@ -59,6 +59,23 @@ def test(root):
     next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='↶ 취소').invoke()
     root.update()
     assert len(canvas.find_all())==count+1
+    # Hold right, then press/drag the pen tip (left) while pen stays selected.
+    canvas.event_generate('<ButtonPress-3>',x=600,y=100)
+    canvas.event_generate('<ButtonPress-1>',x=100,y=100,state=0x400)
+    canvas.event_generate('<B1-Motion>',x=150,y=110,state=0x500)
+    canvas.event_generate('<ButtonRelease-1>',x=150,y=110,state=0x500)
+    canvas.event_generate('<ButtonRelease-3>',x=150,y=110)
+    root.update()
+    assert len(canvas.find_all())==count
+    assert root.getvar(pen_button.cget('variable'))=='펜'
+    next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='↶ 취소').invoke()
+    root.update()
+    assert len(canvas.find_all())==count+1
+    # Tool shortcuts, including uppercase and restoring pen.
+    canvas.focus_force(); root.update()
+    for key,expected in [('v','올가미'),('e','획 지우개'),('S','펜')]:
+        canvas.event_generate('<KeyPress-'+key+'>'); root.update()
+        assert root.getvar(pen_button.cget('variable'))==expected
     add.invoke(); root.update()
     assert len(canvas.find_all())==count
     canvas.focus_force(); root.update()
@@ -66,6 +83,12 @@ def test(root):
     assert len(canvas.find_all())==count+1
     canvas.event_generate('<Right>'); root.update()
     assert len(canvas.find_all())==count
+    # Going next from the last page creates exactly one page.
+    next_page=next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='다음 ›')
+    next_page.invoke(); root.update()
+    assert len(canvas.find_all())==count
+    canvas.event_generate('<Left>'); root.update()
+    canvas.event_generate('<Right>'); root.update()
     # Drag the paper without creating ink.
     canvas.yview_moveto(.4)
     old=canvas.yview()
@@ -93,13 +116,40 @@ def test(root):
     assert any(w.winfo_manager()=='place' for w in tree.winfo_children())
     tree.event_generate('<ButtonRelease-1>',x=60,y=y0+1)
     root.update()
+    # Folder edges reorder folders; centres accept notes at the top.
+    new_folder=next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='새 폴더')
+    for title in ('폴더 A','폴더 B'):
+        with patch.object(simpledialog,'askstring',return_value=title):
+            new_folder.invoke()
+        root.update()
+    folder_a,folder_b=tree.get_children('')[:2]
+    def drag_row(row,target,centre=False):
+        _,y,_,h=tree.bbox(row)
+        _,ty,_,th=tree.bbox(target)
+        tree.event_generate('<ButtonPress-1>',x=60,y=y+h//2)
+        tree.event_generate('<B1-Motion>',x=60,y=ty+(th//2 if centre else 1))
+        root.update()
+        tree.event_generate('<ButtonRelease-1>',x=60,y=ty+(th//2 if centre else 1))
+        root.update()
+    drag_row(folder_b,folder_a)
+    assert tree.get_children('')[:2]==(folder_b,folder_a)
+    tree.selection_set(folder_b); root.update()
+    with patch.object(simpledialog,'askstring',return_value='기존 폴더 노트'):
+        next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='새 노트').invoke()
+    root.update()
+    old_child=tree.get_children(folder_b)[0]
+    drag_row(second,folder_b,centre=True)
+    assert tree.get_children(folder_b)==(second,old_child)
     root.tk.call(root.protocol('WM_DELETE_WINDOW'))
     data=Library(Path(os.environ['LOCALAPPDATA'])/'PenNotes/library.json').data
-    assert data['notes'][0]['title']=='두 번째 노트'
-    assert len(data['notes'][1]['pages'])==2
-    assert len(data['notes'][1]['pages'][0])==1
+    original=next(n for n in data['notes'] if n['title']=='첫 번째 노트')
+    assert len(original['pages'])==3
+    assert len(original['pages'][0])==1
+    assert data['folders'][0]['id']==folder_b
+    assert data['order'].index(second)<data['order'].index(old_child)
+    assert next(n for n in data['notes'] if n['id']==second)['folder']==folder_b
     assert not errors,errors
-    print('GUI PASS: drawing, sliders, right-button eraser/undo, arrow pages, paper pan, live note drag/reorder, save')
+    print('GUI PASS: held-right + pen eraser, shortcuts, auto page, folder reorder, top insertion, drawing, sliders and save')
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as data_dir:
         with patch.dict(os.environ, {'LOCALAPPDATA': data_dir}), patch.object(tk.Tk, 'mainloop', test):

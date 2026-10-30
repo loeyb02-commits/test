@@ -120,6 +120,28 @@ class Library:
         index = next((i for i,n in enumerate(notes) if n['id']==before), len(notes))
         notes.insert(index, item)
 
+    def move_folder(self, folder_id, parent=None, before=None):
+        folders = self.data['folders']
+        descendants = {folder_id}
+        while True:
+            more = {f['id'] for f in folders if f['parent'] in descendants}
+            if more <= descendants:
+                break
+            descendants |= more
+        if parent in descendants:
+            raise ValueError('폴더를 자기 자신이나 하위 폴더 안으로 옮길 수 없습니다.')
+        item = next(f for f in folders if f['id']==folder_id)
+        if before == folder_id:
+            return
+        item['parent'] = parent
+        folders.remove(item)
+        index = next((i for i,f in enumerate(folders) if f['id']==before), len(folders))
+        folders.insert(index, item)
+
+    def apply_tree_order(self, ordered_ids):
+        # Keep the visible mixed folder/note order across rebuild and restart.
+        self.data['order'] = list(ordered_ids)
+
 
 class History:
     def __init__(self):
@@ -241,6 +263,9 @@ def main():
                 pending.remove(f)
         for n in library.data['notes']:
             tree.insert(n['folder'] or '', 'end', iid=n['id'], text='▤ '+n['title'])
+        for row in library.data.get('order', []):
+            if tree.exists(row):
+                tree.move(row, tree.parent(row), 'end')
         tree.selection_set(note['id'])
 
     def redraw():
@@ -267,7 +292,8 @@ def main():
 
     def note_press(e):
         row = tree.identify_row(e.y)
-        if any(n['id']==row for n in library.data['notes']):
+        tree_drag.clear()
+        if row:
             tree_drag.update(id=row, x=e.x, y=e.y, active=False)
 
     def note_drag(e):
@@ -288,14 +314,23 @@ def main():
         if target == dragged:
             return 'break'
         folders = {f['id'] for f in library.data['folders']}
-        if target in folders:
-            tree.item(target,open=True)
-            tree.move(dragged,target,'end')
-        elif target:
-            parent = tree.parent(target)
+        if target:
             _, y, _, height = tree.bbox(target)
-            index = tree.index(target) + (e.y > y+height/2)
-            tree.move(dragged,parent,index)
+            # Folder centre accepts contents; its top/bottom edges reorder siblings.
+            into = target in folders and y+height*.25 <= e.y <= y+height*.75
+            parent = target if into else tree.parent(target)
+            ancestor = parent
+            while ancestor:
+                if ancestor == dragged:
+                    return 'break'
+                ancestor = tree.parent(ancestor)
+            if into:
+                tree.item(target,open=True)
+                tree.move(dragged,target,0)
+            else:
+                siblings = [row for row in tree.get_children(parent) if row != dragged]
+                index = siblings.index(target) + (e.y > y+height/2)
+                tree.move(dragged,parent,index)
         else:
             tree.move(dragged,'','end')
         return 'break'
@@ -306,9 +341,19 @@ def main():
             dragged = tree_drag['id']
             parent = tree.parent(dragged)
             siblings = list(tree.get_children(parent))
-            next_note = next((row for row in siblings[siblings.index(dragged)+1:]
-                              if any(n['id']==row for n in library.data['notes'])), None)
-            library.move_note(dragged, parent or None, next_note)
+            is_folder = any(f['id']==dragged for f in library.data['folders'])
+            collection = library.data['folders' if is_folder else 'notes']
+            next_item = next((row for row in siblings[siblings.index(dragged)+1:]
+                              if any(item['id']==row for item in collection)), None)
+            if is_folder:
+                library.move_folder(dragged, parent or None, next_item)
+            else:
+                library.move_note(dragged, parent or None, next_item)
+            def walk(parent=''):
+                for row in tree.get_children(parent):
+                    yield row
+                    yield from walk(row)
+            library.apply_tree_order(walk())
             changed()
         tree_drag.clear()
 
@@ -442,7 +487,7 @@ def main():
     def turn(delta=0, add=False):
         nonlocal page
         if gesture: return
-        if add:
+        if add or (delta > 0 and page == len(note['pages'])-1):
             note['pages'].append([])
             page=len(note['pages'])-1
             changed()
@@ -522,35 +567,64 @@ def main():
             space_down = pressed
             return 'break'
 
+    right_down = False
+    left_down = False
+
+    def right_held(e):
+        from .windows_input import right_button_pressed
+        return right_down or right_button_pressed(getattr(e,'state',0))
+
     def left_press(e):
-        nonlocal gesture
-        if space_down:
+        nonlocal gesture, left_down
+        left_down = True
+        if right_held(e):
+            press(e, '획 지우개')
+        elif space_down:
             if gesture: release(None)
             canvas.scan_mark(e.x, e.y)
             gesture = dict(mode='pan')
         else:
             press(e)
 
-    original_drag = drag
     def pointer_drag(e):
-        if gesture and gesture['mode']=='pan':
+        if right_held(e):
+            if not gesture or gesture['mode'] != '획 지우개':
+                press(e, '획 지우개')
+            else:
+                drag(e)
+        elif gesture and gesture['mode']=='pan':
             canvas.scan_dragto(e.x,e.y,gain=1)
         else:
-            original_drag(e)
+            drag(e)
 
     def left_release(e):
-        if gesture and gesture.get('button') == 3:
-            return
+        nonlocal left_down
+        left_down = False
         release(e)
 
+    def right_press(e):
+        nonlocal right_down
+        right_down = True
+        if e.widget is canvas:
+            press(e, '획 지우개')
+            return 'break'
+
     def right_release(e):
-        if gesture and gesture.get('button') == 3:
+        nonlocal right_down
+        right_down = False
+        if gesture and gesture['mode']=='획 지우개':
             release(e)
+            if left_down and e.widget is canvas:
+                press(e)
+        if e.widget is canvas:
+            return 'break'
 
     canvas.bind('<ButtonPress-1>',left_press)
-    canvas.bind('<ButtonPress-3>',lambda e:press(e, '획 지우개'))
+    canvas.bind('<ButtonPress-3>',right_press)
     canvas.bind('<B3-Motion>',pointer_drag)
     canvas.bind('<ButtonRelease-3>',right_release)
+    root.bind('<ButtonPress-3>',right_press)
+    root.bind('<ButtonRelease-3>',right_release)
     root.bind('<KeyPress-space>',lambda e:space(e,True))
     root.bind('<KeyRelease-space>',lambda e:space(e,False))
     canvas.bind('<B1-Motion>',pointer_drag)
@@ -566,6 +640,19 @@ def main():
             return 'break'
     root.bind('<Left>',lambda e:page_key(e,-1))
     root.bind('<Right>',lambda e:page_key(e,1))
+    def tool_key(e):
+        if e.state & (0x4 | 0x8 | 0x20000):
+            return  # preserve Ctrl/Alt shortcuts
+        if e.widget.winfo_class() in ('Entry','TEntry','Text','TCombobox'):
+            return
+        selected = {'s':'펜', 'v':'올가미', 'e':'획 지우개'}.get(e.keysym.lower())
+        if selected:
+            if gesture: release(None)
+            tool.set(selected)
+            palette()
+            return 'break'
+    for key in ('s','S','v','V','e','E'):
+        root.bind('<KeyPress-'+key+'>',tool_key)
     root.bind('<Control-z>',lambda e:undo())
     root.bind('<Control-y>',lambda e:undo(True))
     root.bind('<Control-s>',lambda e:save())

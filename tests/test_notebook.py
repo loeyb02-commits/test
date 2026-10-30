@@ -133,3 +133,24 @@ class InputTests(unittest.TestCase):
             restored=Library(lib.path)
             self.assertEqual(restored.data,lib.data)
             self.assertEqual(restored.data['notes'][-1]['folder'],folder['id'])
+
+
+class FolderAndButtonTests(unittest.TestCase):
+    def test_folder_reordering_and_descendant_cycle_prevention(self):
+        with tempfile.TemporaryDirectory() as d:
+            lib=Library(Path(d)/'library.json')
+            a=lib.folder('A')
+            b=lib.folder('B')
+            child=lib.folder('child',a['id'])
+            lib.move_folder(b['id'],before=a['id'])
+            self.assertEqual([f['title'] for f in lib.data['folders']],['B','A','child'])
+            with self.assertRaises(ValueError): lib.move_folder(a['id'],child['id'])
+            with self.assertRaises(ValueError): lib.move_folder(a['id'],a['id'])
+            lib.apply_tree_order([b['id'],a['id'],child['id']])
+            lib.save()
+            self.assertEqual(Library(lib.path).data,lib.data)
+
+    def test_right_button_detected_with_left_button_also_pressed(self):
+        from penasmr.windows_input import right_button_pressed
+        self.assertTrue(right_button_pressed(0x0400))
+        self.assertTrue(right_button_pressed(0x0500))

@@ -1,6 +1,7 @@
 """Filter Windows touch before Tk converts it to ordinary mouse input."""
 import ctypes as C
 import os
+from functools import lru_cache
 from ctypes import wintypes as W
 
 
@@ -8,6 +9,22 @@ def is_touch_mouse(extra):
     # Microsoft MI_WP_SIGNATURE and touch flag; pen uses the same signature
     # without the touch bit. Keep physical mouse and pen messages.
     return extra & 0xFFFFFF00 == 0xFF515700 and bool(extra & 0x80)
+
+
+@lru_cache(maxsize=1)
+def _right_button_query():
+    user = C.WinDLL('user32', use_last_error=True)
+    user.GetAsyncKeyState.argtypes = [C.c_int]
+    user.GetAsyncKeyState.restype = C.c_short
+    return user.GetAsyncKeyState
+
+
+def right_button_pressed(state=0):
+    if state & 0x0400:  # Tk Button3Mask, including combined left+right events
+        return True
+    if os.name == 'nt':
+        return bool(_right_button_query()(0x02) & 0x8000)
+    return False
 
 
 class TouchFilter:
