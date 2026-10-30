@@ -6,6 +6,9 @@ OneNote를 그대로 사용하면서 Wintab이 제공하는 펜 좌표·필압�
 
 WTOpen 초기화 오류 수정과 재검증 절차: [상세 진단 안내](docs/WINTAB-DIAGNOSIS.md).
 
+Raw HID 실험 모드: [백그라운드 수집 구현·검사 안내](docs/RAW-HID.md).
+Wintab은 사용자 실기에서 다른 창 활성화 시 수신이 멈췄습니다. 새 Raw HID 모드는 아직 실기 미검증입니다.
+
 ## 실행
 
 1. Windows 11에 공식 Wacom 드라이버와 Python **3.13 x64**(Tk 포함)를 설치합니다.
@@ -41,7 +44,9 @@ Windows에서 `build.cmd` 실행 후 `dist\PenASMR\PenASMR.exe`를 실행합니�
 * Raw Input: RIDEV_INPUTSINK로 백그라운드 HID 관찰이 가능한 경우가 있지만,
   실제 장치가 내보내는 HID usage/report descriptor를 확인하고 압력·접촉 비트를
   HidP API로 해석해야 합니다. PTH-451의 보고서 형식을 추측하지 않았습니다.
-  이 저장소에는 Raw HID 또는 Ink 대체 백엔드가 아직 없습니다.
+  이 저장소에는 이제 `--backend rawhid` 실험 백엔드가 있습니다.
+  표준 펜 descriptor의 제한된 필드 조합을 지원하며 OneNote 동시 수신은 아직 미검증입니다.
+  Ink 전역 입력 백엔드는 없습니다.
   `--hid-info`는 대체 가능성 판단에 필요한 조회 전용 장치 목록을 저장합니다.
 
 압력 범위는 드라이버 DVC_NPRESSURE에서 조회하므로 2048을 하드코딩하지 않습니다.

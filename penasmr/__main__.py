@@ -8,20 +8,21 @@ from .core import Tracker, Friction
 from .wintab import Wintab, DiagnosticLog
 
 def main():
-    parser = argparse.ArgumentParser(description='PenASMR Wintab observer')
-    parser.add_argument('--input-only',action='store_true',help='Test Wintab without opening an audio device')
+    parser = argparse.ArgumentParser(description='PenASMR pen input and friction audio')
+    parser.add_argument('--backend',choices=('wintab','rawhid'),default='wintab',help='Input backend; rawhid is experimental')
+    parser.add_argument('--input-only',action='store_true',help='Test selected input backend without opening an audio device')
     parser.add_argument('--hid-info',action='store_true',help='Save read-only HID inventory and exit; does not capture pen input')
     args = parser.parse_args()
     if os.name != 'nt':
         raise SystemExit('Windows 11 and Wacom driver required. Run tests on Linux with unittest.')
     root = tk.Tk()
-    root.title('PenASMR — Wacom' + (' [input only]' if args.input_only else ''))
+    root.title(f'PenASMR — {args.backend}' + (' [input only]' if args.input_only else ''))
     root.geometry('540x390')
     tracker, engine = Tracker(), Friction()
     backend = stream = None
     failures = 0
     config = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'PenASMR'
-    diagnostics = DiagnosticLog(config / 'wintab-startup.json')
+    diagnostics = DiagnosticLog(config / f'{args.backend}-startup.json')
     if args.hid_info:
         from .rawhid_probe import enumerate_hid
         try:
@@ -66,9 +67,16 @@ def main():
                     maximum_raw_pressure=backend.max_pressure if backend else 0,
                     audio_status_events=failures,errors=errors,
                     input_only=args.input_only,
-                    wintab_startup=diagnostics.data,
+                    input_backend=args.backend,
+                    raw_messages=getattr(backend,'raw_messages',0),
+                    sink_messages=getattr(backend,'sink_messages',0),
+                    transition_packets=getattr(backend,'transition_packets',0),
+                    wintab_startup=diagnostics.data if args.backend=='wintab' else None,
+                    rawhid_startup=diagnostics.data if args.backend=='rawhid' else None,
                     startup_log_write_error=diagnostics.write_error,
-                    note='Background means another window, not proof that OneNote was foreground. Follow README controlled test.')
+                    note=('Raw HID background requires WM_INPUTSINK and another foreground window stable for 500ms. '
+                          if args.backend=='rawhid' else 'Wintab background is approximate and can include queued transition packets. ')
+                         + 'Neither counter alone proves OneNote coexistence. Follow controlled test.')
         path = config / 'diagnostics.json'
         path.write_text(json.dumps(data,indent=2),encoding='utf-8')
         messagebox.showinfo('Diagnostics',str(path))
@@ -85,7 +93,11 @@ def main():
     root.protocol('WM_DELETE_WINDOW',close)
     root.update_idletasks()
     try:
-        backend = Wintab(root.winfo_id(),tracker,diagnostics)
+        if args.backend=='rawhid':
+            from .rawhid import RawHID
+            backend = RawHID(root.winfo_id(),tracker,diagnostics)
+        else:
+            backend = Wintab(root.winfo_id(),tracker,diagnostics)
         if not args.input_only:
             import sounddevice as sd
             stream = sd.RawOutputStream(samplerate=48000,channels=1,dtype='float32',blocksize=256,latency='low',callback=callback)

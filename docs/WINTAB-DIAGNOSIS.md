@@ -1,5 +1,9 @@
 # WTOpen 초기화 수정과 Windows 재검증
 
+후속 실기에서 Wintab 전경 입력은 확인됐고 다른 창 활성화 시 수신이 멈췄습니다.
+HID 목록을 근거로 추가한 대체 구현은 [Raw HID 안내](RAW-HID.md)를 확인하세요.
+아래는 Wintab 초기화 진단 기록이며 Wintab 백그라운드 성공을 뜻하지 않습니다.
+
 ## 두 번째 실제 로그로 확인한 필압 기능 검사 수정 (초기화 revision 4)
 
 두 번째 로그는 revision 3의 옵션/장치 처리를 통과했지만,
@@ -176,7 +180,8 @@ HID 목록을 저장할 수 있습니다. Wintab DLL과 오디오 장치를 열�
 Wacom vendor ID는 1386 (`0x056a`), Digitizers usage page는 13 (`0x0d`)입니다.
 와콤 장치라도 vendor-specific usage만 보이거나, 드라이버가 펜 인터페이스를 Raw Input에
 노출하지 않을 수 있습니다. 목록에 장치가 보이는 것과 실제 보고서를 읽는 것은 별개입니다.
-이 도구는 장치 등록·캡처·독점 열기를 하지 않으며 **Raw HID 입력 백엔드는 아닙니다.**
+이 조회 도구 자체는 장치 등록·캡처·독점 열기를 하지 않습니다.
+별도의 `--backend rawhid` 실험 입력 백엔드는 [Raw HID 안내](RAW-HID.md)를 참고하세요.
 
 실제 대체 백엔드를 구현하려면 해당 PC에서 다음을 검증해야 합니다:
 
@@ -190,8 +195,7 @@ Wacom vendor ID는 1386 (`0x056a`), Digitizers usage page는 13 (`0x0d`)입니�
 4. OneNote가 전경인 동안 실제 보고서와 변화하는 압력/접촉 비트가 함께 들어오고,
    OneNote 선/압력이 보존되는지 별도 검증. 장치 연결 해제/재연결도 처리.
 
-Raw HID도 드라이버가 데이터를 숨기거나 독점 처리하면 이용이 제한됩니다. 현재는
-장치 보고서/디스크립터가 없어 PTH-451용 보고서 형식을 추측해 자동 대체하지 않았습니다.
+Raw HID도 드라이버가 데이터를 숨기거나 독점 처리하면 이용이 제한됩니다. 현재 대체 백엔드는 표준 HID descriptor로 확인한 필드만 사용하며 vendor 보고서 형식은 추측하지 않습니다.
 다음 진단에는 `wintab-startup.json`, 실험 후 `diagnostics.json`, 필요하면
 `hid-inventory.json`, Wacom 드라이버 버전을 함께 사용합니다.
 
