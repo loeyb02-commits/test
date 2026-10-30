@@ -264,7 +264,7 @@ def main():
     # Reserve a fixed-height status row before packing the expanding content.
     ttk.Label(root, textvariable=status, anchor='w', width=1).pack(side='bottom', fill='x')
     side = ttk.Frame(root, padding=10)
-    side.pack(side='left', fill='y')
+    side.pack(side='right', fill='y')
     ttk.Label(side, text='나의 노트', font=('', 17, 'bold')).pack(anchor='w', pady=8)
     tree = ttk.Treeview(side, show='tree', selectmode='browse', height=25)
     tree.pack(fill='both', expand=True)
