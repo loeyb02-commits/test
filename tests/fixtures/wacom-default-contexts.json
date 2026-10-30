@@ -74,5 +74,6 @@
       "syssensy": 65536,
       "name": ""
     }
-  }
+  },
+  "reported_fixed_packet_data": 511
 }

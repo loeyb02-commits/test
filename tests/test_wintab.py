@@ -18,7 +18,7 @@ class Function:
 
 class Driver:
     def __init__(self, reject_system=False, reject_unicode=False,
-                 pressure=True, demote=True, bad_effective=False):
+                 pressure=True, demote=True, bad_effective=False, drop_effective_pressure=False):
         self.opens, self.operations = [], []
         self.live = None
         self.contexts = {}
@@ -27,6 +27,7 @@ class Driver:
         self.pressure = pressure
         self.demote = demote
         self.bad_effective = bad_effective
+        self.drop_effective_pressure = drop_effective_pressure
         for suffix,cls in [('W',wt.LOGCONTEXT),('A',wt.LOGCONTEXTA)]:
             setattr(self,'WTInfo'+suffix,Function(lambda cat,idx,out,s=suffix,c=cls:self.info(s,c,cat,idx,out)))
             setattr(self,'WTOpen'+suffix,Function(lambda hwnd,p,enable,s=suffix:self.open(s,hwnd,p,enable)))
@@ -83,6 +84,8 @@ class Driver:
         ctx=self.contexts[h]
         if self.bad_effective:
             ctx.pktdata |= 0x40
+        if self.drop_effective_pressure:
+            ctx.pktdata &= ~0x400
         C.memmove(p,C.byref(ctx),C.sizeof(ctx))
         return True
 
@@ -107,6 +110,8 @@ class ReportedDefaultsDriver(Driver):
                     setattr(value,name,number)
         elif category==1:
             value=wt.U32(self.fixture['context_options'] if index==7 else self.fixture['ndevices'])
+        elif category==100 and index==6:
+            value=wt.U32(self.fixture['reported_fixed_packet_data'])
         else:
             return super().info(suffix,cls,category,index,out)
         if out is not None:
@@ -167,13 +172,36 @@ class InitializationTests(unittest.TestCase):
         self.make(d)
         self.assertEqual(d.opens[0][0],'A')
 
-    def test_missing_pressure_never_claims_success(self):
+    def test_incomplete_metadata_is_advisory_and_does_not_fake_pressure(self):
         d=Driver(pressure=False)
-        with self.assertRaisesRegex(RuntimeError,'All conservative'):
+        b=self.make(d)
+        self.assertTrue(d.opens)
+        self.assertEqual(b.contact_packets,0)
+        self.assertEqual(b.max_pressure,0)
+        self.assertEqual(self.log.data['background_delivery'],'not_verified')
+        self.assertTrue(any(e['event']=='packet_capability_warning' for e in self.log.data['events']))
+
+    def test_driver_dropping_pressure_in_effective_packet_is_rejected(self):
+        d=Driver(pressure=False,drop_effective_pressure=True)
+        with self.assertRaises(RuntimeError):
+            self.make(d)
+        self.assertIsNone(d.live)
+        self.assertFalse(any(e['event']=='context_opened' for e in self.log.data['events']))
+
+    def test_incomplete_metadata_does_not_bypass_invalid_pressure_axis(self):
+        d=Driver(pressure=False)
+        original=d.info
+        def bad_axis(suffix,cls,category,index,out):
+            if category==100 and index==15:
+                value=wt.AXIS(0,0,0,0)
+                if out is not None:
+                    C.memmove(out,C.byref(value),C.sizeof(value))
+                return C.sizeof(value)
+            return original(suffix,cls,category,index,out)
+        d.info=bad_axis
+        with self.assertRaises(RuntimeError):
             self.make(d)
         self.assertFalse(d.opens)
-        self.assertEqual(self.log.data['events'][-1]['event'],'startup_failed')
-        self.assertTrue(self.log.path.exists())
 
     def test_demote_failure_never_enables_and_closes_every_handle(self):
         d=Driver(demote=False)
@@ -258,6 +286,41 @@ class InitializationTests(unittest.TestCase):
         self.assertEqual(len(d.opens),2)
         self.assertEqual(d.opens[1][3]['options'],0)
         self.assertEqual(d.opens[1][3]['device'],0xffffffff)
+
+    def test_pressure_in_cursor_dependent_mask_is_supported(self):
+        d=ReportedDefaultsDriver()
+        original=d.info
+        def cursor_info(suffix,cls,category,index,out):
+            if category==100 and index==8:
+                value=wt.U32(0x400) # simulated cursor-dependent pressure
+                if out is not None:
+                    C.memmove(out,C.byref(value),C.sizeof(value))
+                return C.sizeof(value)
+            return original(suffix,cls,category,index,out)
+        d.info=cursor_info
+        self.make(d)
+        event=next(e for e in self.log.data['events'] if e['event']=='packet_capabilities')
+        self.assertEqual(event['fixed'],0x1ff) # from uploaded log
+        self.assertEqual(event['cursor_dependent'],0x400)
+        self.assertEqual(event['supported'] & wt.MASK,wt.MASK)
+        self.assertFalse(any(e['event']=='packet_capability_warning' for e in self.log.data['events']))
+
+    def test_pressure_in_individual_cursor_mask_is_collected(self):
+        d=ReportedDefaultsDriver()
+        original=d.info
+        def cursor_info(suffix,cls,category,index,out):
+            values={(100,8):0,(100,4):7,(100,3):1,(207,3):0x580}
+            if (category,index) in values:
+                value=wt.U32(values[category,index])
+                if out is not None:
+                    C.memmove(out,C.byref(value),C.sizeof(value))
+                return C.sizeof(value)
+            return original(suffix,cls,category,index,out)
+        d.info=cursor_info
+        self.make(d)
+        event=next(e for e in self.log.data['events'] if e['event']=='packet_capabilities')
+        self.assertEqual(event['cursors'],[{'index':7,'packet_data':0x580}])
+        self.assertEqual(event['supported'] & wt.MASK,wt.MASK)
 
     def test_multiple_devices_do_not_use_arbitrary_aggregate_calibration(self):
         d=ReportedDefaultsDriver()

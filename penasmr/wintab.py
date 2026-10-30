@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import sys
 import time
 
 U32, I32 = C.c_uint32, C.c_int32
@@ -92,7 +93,7 @@ class DiagnosticLog:
         base = Path(os.environ.get('LOCALAPPDATA',str(Path.home()))) / 'PenASMR'
         self.path = Path(path) if path else base / 'wintab-startup.json'
         self.data = {
-            'schema': 1, 'initialization_revision': 3,
+            'schema': 1, 'initialization_revision': 4,
             'python': platform.python_version(), 'platform': platform.platform(),
             'pointer_bits': C.sizeof(C.c_void_p)*8,
             'abi': {'LOGCONTEXTW': C.sizeof(LOGCONTEXT), 'LOGCONTEXTA': C.sizeof(LOGCONTEXTA),
@@ -151,6 +152,47 @@ class Wintab:
             raise RuntimeError(f'WTInfo category={category} index={index}: returned {copied}, expected {size}')
         return cls.from_buffer_copy(buf)
 
+    def _optional_uint(self, info, category, index):
+        try:
+            return self._query(info,category,index,U32).value
+        except RuntimeError as exc:
+            self.log.add('capability_query_warning',category=category,index=index,error=str(exc))
+            return None
+
+    def _query_text(self, info, category, index, suffix):
+        size = int(info(category,index,None))
+        if not 0 < size <= 16384 or (suffix == 'W' and size % 2):
+            return None
+        buf = C.create_string_buffer(size)
+        if int(info(category,index,buf)) != size:
+            return None
+        encoding = 'utf-16-le' if suffix == 'W' else ('mbcs' if sys.platform == 'win32' else 'ascii')
+        return buf.raw.decode(encoding,errors='replace').split('\0',1)[0]
+
+    def _packet_capabilities(self, info, device, suffix):
+        category = WTI_DEVICES + device
+        fixed = self._optional_uint(info,category,6) # DVC_PKTDATA
+        dependent = self._optional_uint(info,category,8) # DVC_CSRDATA
+        first = self._optional_uint(info,category,4) # DVC_FIRSTCSR
+        count = self._optional_uint(info,category,3) # DVC_NCSRTYPES
+        combined = (fixed or 0) | (dependent or 0)
+        cursors = []
+        if first is not None and count is not None and 0 <= count <= 64 and first + count < 0xffffffff:
+            for cursor in range(first,first+count):
+                mask = self._optional_uint(info,200+cursor,3) # CSR_PKTDATA
+                combined |= mask or 0
+                cursors.append({'index':cursor,'packet_data':mask})
+        else:
+            self.log.add('cursor_enumeration_warning',first=first,count=count)
+        self.log.add('packet_capabilities',device=device,
+                     device_name=self._query_text(info,category,1,suffix),
+                     fixed=fixed,cursor_dependent=dependent,cursors=cursors,
+                     supported=combined,required=MASK,
+                     note='Metadata only. DVC_PKTDATA excludes cursor-dependent fields; it alone cannot establish pressure support.')
+        if combined & MASK != MASK:
+            self.log.add('packet_capability_warning',missing=MASK & ~combined,
+                         note='Metadata does not report all requested fields. Try disabled WTOpen; require WTGet exact ABI and valid pressure axis. Never synthesize missing pressure.')
+
     def _initialize(self, hwnd):
         if os.name != 'nt':
             raise RuntimeError('Wintab requires Windows')
@@ -191,6 +233,8 @@ class Wintab:
                 ndevices = None
                 self.log.add('device_count_warning',api=suffix,error=str(exc))
             self.log.add('interface',api=suffix,context_options=caps,ndevices=ndevices)
+            self.log.add('driver_identity',api=suffix,
+                         wintab_id=self._query_text(info,1,1,suffix)) # IFC_WINTABID
             for category in (WTI_DEFSYSCTX,WTI_DEFCONTEXT):
                 try:
                     default = self._query(info,category,0,cls)
@@ -208,10 +252,7 @@ class Wintab:
                     self.log.add('device_resolution',context_device=int(ctx.device),
                                  capability_device=device,ndevices=ndevices,
                                  note='Context binding/mapping unchanged; aggregate single-device capability queries use physical device zero.')
-                    supported = self._query(info,WTI_DEVICES+device,6,U32).value # DVC_PKTDATA
-                    self.log.add('packet_capabilities',device=device,supported=supported,required=MASK)
-                    if supported & MASK != MASK:
-                        raise RuntimeError(f'Device lacks required X/Y/pressure packet bits: {MASK & ~supported:#x}')
+                    self._packet_capabilities(info,device,suffix)
                     axes = [self._query(info,WTI_DEVICES+device,index,AXIS) for index in (12,13,15)]
                     if any(a.maximum <= a.minimum for a in axes):
                         raise RuntimeError('Invalid device X/Y/normal-pressure axis')
