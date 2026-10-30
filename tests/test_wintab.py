@@ -91,6 +91,28 @@ class Driver:
         self.live=None
         return True
 
+class ReportedDefaultsDriver(Driver):
+    """Replay uploaded default contexts; later device/open behavior is simulated."""
+    def __init__(self, **kwargs):
+        self.fixture=json.loads((Path(__file__).parent/'fixtures'/'wacom-default-contexts.json').read_text())
+        self.queries=[]
+        super().__init__(**kwargs)
+
+    def info(self,suffix,cls,category,index,out):
+        self.queries.append((category,index))
+        if category in (3,4):
+            value=cls()
+            for name,number in self.fixture['contexts'][str(category)].items():
+                if name != 'name':
+                    setattr(value,name,number)
+        elif category==1:
+            value=wt.U32(self.fixture['context_options'] if index==7 else self.fixture['ndevices'])
+        else:
+            return super().info(suffix,cls,category,index,out)
+        if out is not None:
+            C.memmove(out,C.byref(value),C.sizeof(value))
+        return C.sizeof(value)
+
 class InitializationTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -212,6 +234,43 @@ class InitializationTests(unittest.TestCase):
         self.assertEqual(prepared.options,wt.CXO_SYSTEM)
         self.assertEqual(original.options,15)
         self.assertEqual(original.btndnmask,0xffffffff)
+
+    def test_reported_defaults_pass_normalization_and_query_physical_device(self):
+        d=ReportedDefaultsDriver()
+        self.make(d)
+        self.assertEqual(len(d.opens),1)
+        ctx=d.opens[0][3]
+        self.assertEqual(ctx['options'],1) # inherited 0x8011, interface supports 0x0d
+        self.assertEqual(ctx['device'],0xffffffff) # preserve valid virtual binding
+        self.assertEqual((ctx['inextx'],ctx['outextx']),(31496,1920))
+        self.assertIn((100,6),d.queries)
+        self.assertNotIn((99,6),d.queries)
+        self.assertNotIn((100+0xffffffff,6),d.queries)
+        resolved=next(e for e in self.log.data['events'] if e['event']=='device_resolution')
+        self.assertEqual(resolved['capability_device'],0)
+        normalized=next(e for e in self.log.data['events'] if e['event']=='prepared_options')
+        self.assertEqual(normalized['removed'],0x8010)
+        self.assertTrue(any(e['event']=='WTOpenW' for e in self.log.data['events']))
+
+    def test_reported_digitizer_fallback_also_clears_default_extra_options(self):
+        d=ReportedDefaultsDriver(reject_system=True)
+        self.make(d)
+        self.assertEqual(len(d.opens),2)
+        self.assertEqual(d.opens[1][3]['options'],0)
+        self.assertEqual(d.opens[1][3]['device'],0xffffffff)
+
+    def test_multiple_devices_do_not_use_arbitrary_aggregate_calibration(self):
+        d=ReportedDefaultsDriver()
+        d.fixture['ndevices']=2
+        with self.assertRaises(RuntimeError):
+            self.make(d)
+        self.assertFalse(d.opens)
+
+    def test_unknown_aggregate_device_count_is_not_guessed(self):
+        for count in (None,0,2):
+            with self.subTest(count=count), self.assertRaises(RuntimeError):
+                wt.capability_device(0xffffffff,count)
+        self.assertEqual(wt.capability_device(0xffffffff,1),0)
 
 if __name__=='__main__':
     unittest.main()

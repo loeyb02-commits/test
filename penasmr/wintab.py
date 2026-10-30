@@ -46,7 +46,7 @@ def context_values(ctx):
     return result
 
 def prepare_context(default):
-    """Keep driver mappings; remove unsupported legacy pen-service integration."""
+    """Keep driver mappings; request only options needed by this observer."""
     ctx = type(default).from_buffer_copy(default)
     name = b'PenASMR observer'
     if isinstance(ctx, LOGCONTEXT):
@@ -56,13 +56,30 @@ def prepare_context(default):
     else:
         ctx.name = name
     # CXO_PEN is not a generic 'collect pen' or background-subscription flag.
-    # Preserve CXO_SYSTEM only if supplied by the selected driver default.
-    ctx.options &= ~(CXO_PEN | CXO_MESSAGES | CXO_CSRMESSAGES)
+    # Defaults can contain margin/vendor flags absent from IFC_CTXOPTIONS.
+    # Do not reject the default or copy those optional flags into our request.
+    ctx.options &= CXO_SYSTEM
     ctx.pktdata = ctx.movemask = MASK
     ctx.pktmode = 0
     # Do not claim button events / implicit button capture from another app.
     ctx.btndnmask = ctx.btnupmask = 0
     return ctx
+
+def capability_device(context_device, device_count):
+    """Resolve a device for DVC queries, WITHOUT rewriting the context binding.
+
+    Default contexts may bind to the aggregate/virtual device UINT_MAX.
+    WTI_DEVICES + UINT_MAX is not a valid physical-device query category.
+    A single physical device is unambiguous; multiple devices need per-device
+    contexts and packet device attribution, which this backend does not provide.
+    """
+    if context_device == 0xffffffff:
+        if device_count == 1:
+            return 0
+        raise RuntimeError('Aggregate context requires exactly one physical device for pressure calibration; device count is unknown or not one')
+    if device_count is not None and not 0 <= context_device < device_count:
+        raise RuntimeError(f'Context device {context_device} outside reported device count {device_count}')
+    return context_device
 
 def validate_context(ctx):
     if not ctx.inextx or not ctx.inexty or not ctx.outextx or not ctx.outexty:
@@ -75,7 +92,8 @@ class DiagnosticLog:
         base = Path(os.environ.get('LOCALAPPDATA',str(Path.home()))) / 'PenASMR'
         self.path = Path(path) if path else base / 'wintab-startup.json'
         self.data = {
-            'schema': 1, 'python': platform.python_version(), 'platform': platform.platform(),
+            'schema': 1, 'initialization_revision': 3,
+            'python': platform.python_version(), 'platform': platform.platform(),
             'pointer_bits': C.sizeof(C.c_void_p)*8,
             'abi': {'LOGCONTEXTW': C.sizeof(LOGCONTEXT), 'LOGCONTEXTA': C.sizeof(LOGCONTEXTA),
                     'AXIS': C.sizeof(AXIS), 'PACKET': C.sizeof(PACKET)},
@@ -164,11 +182,15 @@ class Wintab:
                 continue
             try:
                 caps = self._query(info,1,7,U32).value # IFC_CTXOPTIONS
-                self.log.add('interface',api=suffix,context_options=caps,
-                             ndevices=self._query(info,1,4,U32).value)
             except RuntimeError as exc:
                 caps = None
                 self.log.add('interface_query_warning',api=suffix,error=str(exc))
+            try:
+                ndevices = self._query(info,1,4,U32).value # IFC_NDEVICES
+            except RuntimeError as exc:
+                ndevices = None
+                self.log.add('device_count_warning',api=suffix,error=str(exc))
+            self.log.add('interface',api=suffix,context_options=caps,ndevices=ndevices)
             for category in (WTI_DEFSYSCTX,WTI_DEFCONTEXT):
                 try:
                     default = self._query(info,category,0,cls)
@@ -177,13 +199,20 @@ class Wintab:
                     if category == WTI_DEFCONTEXT:
                         ctx.options &= ~CXO_SYSTEM
                     validate_context(ctx)
+                    self.log.add('prepared_options',api=suffix,category=category,
+                                 inherited=int(default.options),requested=int(ctx.options),
+                                 removed=int(default.options & ~ctx.options))
                     if caps is not None and ctx.options & ~caps:
-                        raise RuntimeError(f'Default requests unsupported option bits: {ctx.options & ~caps:#x}')
-                    supported = self._query(info,WTI_DEVICES+ctx.device,6,U32).value # DVC_PKTDATA
-                    self.log.add('packet_capabilities',device=int(ctx.device),supported=supported,required=MASK)
+                        raise RuntimeError(f'Requested options unsupported by interface: {ctx.options & ~caps:#x}')
+                    device = capability_device(ctx.device,ndevices)
+                    self.log.add('device_resolution',context_device=int(ctx.device),
+                                 capability_device=device,ndevices=ndevices,
+                                 note='Context binding/mapping unchanged; aggregate single-device capability queries use physical device zero.')
+                    supported = self._query(info,WTI_DEVICES+device,6,U32).value # DVC_PKTDATA
+                    self.log.add('packet_capabilities',device=device,supported=supported,required=MASK)
                     if supported & MASK != MASK:
                         raise RuntimeError(f'Device lacks required X/Y/pressure packet bits: {MASK & ~supported:#x}')
-                    axes = [self._query(info,WTI_DEVICES+ctx.device,index,AXIS) for index in (12,13,15)]
+                    axes = [self._query(info,WTI_DEVICES+device,index,AXIS) for index in (12,13,15)]
                     if any(a.maximum <= a.minimum for a in axes):
                         raise RuntimeError('Invalid device X/Y/normal-pressure axis')
                     self.log.add('axes',values=[{n:int(getattr(a,n)) for n,_ in AXIS._fields_} for a in axes])
